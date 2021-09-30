@@ -1,5 +1,10 @@
 # PyAsmPatch
  Use lief, keystone and capstone to manually inline hook elf(so) files
+ 
+ 详见：
+ https://www.jianshu.com/p/915a512fd7e9
+ 
+ 
 
 ```
 [*] mergeSection => .inject => 0x38e0000
