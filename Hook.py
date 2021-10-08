@@ -1,3 +1,11 @@
+#
+#  @Author      lzy <axhlzy@live.cn>
+#  @HomePage    https://github.com/axhlzy
+#  @CreatedTime 2021/09/30 18:42
+#  @UpdateTime  2021/10/08 15:15
+#  @Des         Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) files
+#
+
 import os
 import logging
 import sys
@@ -19,7 +27,7 @@ logger = logging.getLogger(__name__)
 functionsMap = {}
 
 
-class Jumper:
+class JumperBase:
 
     def __init__(self, filePath, ARCH=ARCH_ARM):
 
@@ -55,9 +63,9 @@ class Jumper:
             raise Exception("Todo by yourself -.-")
 
         # 我们需要使用到的导出函数（主要是一些系统函数，如果有没有，我们需要自己去添加需要的lib以及添加导出项）
-        print("\nCurrent Needed Libraries : ")
-        for name in self.lf.libraries:
-            print("\t[*] " + name)
+        # print("\nCurrent Needed Libraries : ")
+        # for name in self.lf.libraries:
+        #     print("\t[*] " + name)
         # if not self.Jumper.lf.has_library("liblog.so"):
         #     self.Jumper.lf.add_library("liblog.so")
 
@@ -161,7 +169,15 @@ class Jumper:
                     self._codeContainer[codeIndex] = self.lf.get_content_from_virtual_address(self.currentPC,
                                                                                               self._pSize * 3)
 
+        def checkJmpRange():
+            # B指令和BL指令最大跳转距离是 ±32M (bits[23:0]是立即数空间,指令最低两位都为 0,去除一个符号位，即为2^25)
+            if abs(self.currentPC - toAddress) >= 32 * 1024 * 1024:
+                raise Exception("Out of Jump range (|{} - {}| = {} > {})".format(hex(self.currentPC), hex(toAddress),
+                                                                                 hex(abs(self.currentPC - toAddress)),
+                                                                                 hex(32 * 1024 * 1024)))
+
         def JMP_B():
+            checkJmpRange()
             SaveCode()
             self._returnAddr = self.currentPC + self._pSize * 1
             self.patchASM("B #{}".format(self.calOffset(self.currentPC - 4 * 2, toAddress)))  # B/BL 本就是从当前位置算起
@@ -172,6 +188,7 @@ class Jumper:
                       + "\t--->\t" + self.getAsmFromAddress(tmpPC)[0])
 
         def JMP_BL():
+            checkJmpRange()
             SaveCode()
             self._returnAddr = self.currentPC + self._pSize * 1
             self.patchASM("BL #{}".format(self.calOffset(self.currentPC - 4 * 2, toAddress)))
@@ -250,7 +267,7 @@ class Jumper:
         # 查找已有字符串的情况，不再走添加流程
         for itemC in self.mapStr.items():
             if itemC[1] == mStr:
-                print("[*] Get string at " + str(hex(itemC[0])) + "\t"+mStr)
+                print("[*] Get string at " + str(hex(itemC[0])) + "\t" + mStr)
                 return itemC[0]
                 # for itemP in self.mapPtr.items():
                 #     if itemP[1] == itemC[0]:
@@ -278,7 +295,7 @@ class Jumper:
         self.currentPC = self._lastPC
         # 保存 string 到 GLOBAL_TABLE
         self.addPtr(self.currentStr - listStr.__len__())
-        print("[*] Create string at "+str(hex(tmpAddr)) + "\t"+mStr)
+        print("[*] Create string at " + str(hex(tmpAddr)) + "\t" + mStr)
         return tmpAddr
 
     def getAddrByExpName(self, expName):
@@ -296,19 +313,24 @@ class Jumper:
         self.patchASM("ADD SP, SP, #{}".format(self._AllocSpSize))
 
     # 调用 addHook 之后 currentPC 指向了我们写代码的位置，写完了记得 “bl lr" 即可
-    def addHook(self, mPtr):
-        self.jumpTo(self.currentTramp, mPtr, codeIndex=0, jmpType="LDR", reg="R12", resetPC=True, resetBackPC=True)
+    def addHook(self, mPtr, jmpType="LDR"):
+        self.jumpTo(self.currentTramp, mPtr, codeIndex=0, jmpType=jmpType, reg="R12", resetPC=True, resetBackPC=True)
         self.saveEnv()
         self.jumpTo(self.currentCodes, jmpType="BL", resetPC=False)
         self.restoreEnv()
         self.restoreCode(codeIndex=0)
-        self.jumpTo(self._jumpBackPC, fromAddress=self.currentPC, jmpType="LDR", reg="LR", resetPC=False)
+        self.jumpTo(self._jumpBackPC, fromAddress=self.currentPC, jmpType=jmpType, reg="R12", resetPC=False)
         self.currentTramp = self.currentPC
         self.currentPC = self.currentCodes
         self.patchASM("STMFD SP!, {LR}")
 
     def endHook(self):
         self.patchASM("LDMFD SP!, {PC}")
+
+
+class CommonBase(JumperBase):
+    def __init__(self, filePath, ARCH=ARCH_ARM):
+        JumperBase.__init__(self, filePath, ARCH=ARCH_ARM)
 
     def strcmp(self, str0, str1, reg0="R0", reg1="R1"):
         if str(str0).startswith("R"):
@@ -329,15 +351,71 @@ class Jumper:
         self.loadToReg(self.getStr(msg), reg=reg1)
         self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg=reg2, resetPC=False)
 
+    def CallFunction(self, mPtr, *args):
+
+        def load4Reg():
+            for i in range(0, len(args)):
+                if type(args[i]) == str:
+                    self.loadToReg(self.getStr(args[i]), "R{}".format(i - 1))
+                elif type(args[i]) == int:
+                    self.patchASM("MOV R{},{}".format("R{}".format(i - 1), args[i]))
+
+        if len(args) <= 4:
+            load4Reg()
+            self.jumpTo(mPtr, jmpType="BL", resetPC=False)
+        else:
+            load4Reg()
+            # todo 多余的参数压栈调用
+            pass
+
+        self.jumpTo(mPtr, jmpType="BL", resetPC=False)
+
+
+class UnityJumper(CommonBase):
+
+    def __init__(self, filePath, ARCH=ARCH_ARM):
+        CommonBase.__init__(self, filePath, ARCH=ARCH_ARM)
+
+    def getUnityStr(self, mStr):
+        pStr = self.getStr(mStr)
+        self.loadToReg(pStr, "R0")
+        self.jumpTo(functionsMap.get("il2cpp_string_new"), jmpType="BL", resetPC=False)
+
+    def FindClass(self, clsName):
+        self.getUnityStr(clsName)
+        self.jumpTo(functionsMap.get("FindClass"), jmpType="BL", resetPC=False)
+        self.patchASM("MOV R4,R0")
+
+    def GetStaticMethodID(self, funcName, sign):
+        self.getUnityStr(funcName)
+        self.patchASM("MOV R5,R0")
+        self.getUnityStr(sign)
+        self.patchASM("MOV R6,R0")
+        self.patchASM("MOV R0,R4")
+        self.patchASM("MOV R1,R5")
+        self.patchASM("MOV R2,R6")
+        self.jumpTo(functionsMap.get("GetStaticMethodID"), jmpType="BL", resetPC=False)
+        self.patchASM("MOV R5,R0")
+
+    def CallStaticVoidMethod(self, clsName, funcName, sign, args):
+        self.FindClass(clsName)
+        self.GetStaticMethodID(funcName, sign)
+        self.patchASM("MOV R0,R4")
+        self.patchASM("MOV R1,R5")
+        # args operation
+        self.patchASM("MOV R2,#0")
+        self.jumpTo(functionsMap.get("CallStaticVoidMethod"), jmpType="BL", resetPC=False)
+
 
 class MergeUtils:
     # 第二个so 合并到第一个so
     def __init__(self, path1, path2):
         self.path1 = path1
         self.path2 = path2
-        self.savePath = os.path.dirname(self.path1) + "/libil2cppN.so"
+        self.offset = None
         self.lf_1 = lief.parse(path1)
         self.lf_2 = lief.parse(path2)
+        self.text = self.lf_1.get_section(".text")
         self.vAddr = None
         self.section = None
 
@@ -347,29 +425,40 @@ class MergeUtils:
                 ".rodata": self.mergeSection(".rodata"),
                 ".data": self.mergeSection(".data")}
 
+    def recordCommon(self):
+        # 记录合并后需要用到的导出地址
+        self.recordSymbol("GLOBAL_TABLE", self.getSym2("GLOBAL_TABLE"))
+        self.recordSymbol("STR_TABLE", self.getSym2("STR_TABLE"))
+        self.recordSymbol("trampolines", self.getSym2("trampolines"))
+        self.recordSymbol("textCodes", self.getSym2("textCodes"))
+        print("\n")
+
     # 合并整个段
     def mergeSeg(self):
         # self.lf_1.add_exported_function(0x5465D8, "SettingsMenuIn")
         self.vAddr = self.lf_1.add(self.lf_2.segments[1]).virtual_address
-        print("[*] mergeSeg => "+self.lf_2.segments[1] + " => "+self.vAddr)
-        self.save()
+        print("[*] mergeSeg => " + self.lf_2.segments[1] + " => " + self.vAddr)
+        retPath = self.save("libil2cpp_merge.so")
+        self.recordCommon()
+        return retPath
 
     # 合并指定节
     def mergeSection(self, section=".text"):
         # 添加了导出函数就会崩溃
         # self.lf_1.add_exported_function(0x5465D8, "SettingsMenuIn")
         self.section = section
-        self.lf_1.add(self.lf_2.get_section(section))
+
         # 先保存一下再打开重新回去vAddr
-        self.lf_1 = lief.parse(self.save())
+        self.text = self.text
+        tempOff = self.lf_1.get_section(".text").virtual_address
+        self.lf_1.add(self.lf_2.get_section(section))
+        retPath = self.save("libil2cpp_merge.so")
+
+        self.offset = self.text.virtual_address - tempOff
         self.vAddr = self.lf_1.get_section(section).virtual_address
-        print("[*] mergeSection => " + section + " => "+str(hex(self.vAddr)))
-
-    def fixSym(self):
-        pass
-
-    def fixInit(self):
-        pass
+        print("[*] mergeSection => " + section + " => " + str(hex(self.vAddr)) + "\n")
+        self.recordCommon()
+        return retPath
 
     def getSym1(self, symName):
         return self.lf_1.get_symbol(symName).value
@@ -378,48 +467,23 @@ class MergeUtils:
         if self.section is None:
             return self.vAddr + self.lf_2.get_symbol(symName).value
         else:
-            ret = self.vAddr + (
+            return self.vAddr + (
                     self.lf_2.get_symbol(symName).value - self.lf_2.get_section(self.section).virtual_address)
-            return ret
 
-    def addExpFunc(self, mPtr, symName):
-        self.lf_1.add_exported_function(mPtr, symName)
-        return mPtr
+    def recordSymbol(self, name, ptr):
+        if str(name) not in ("GLOBAL_TABLE", "STR_TABLE", "trampolines", "textCodes"):
+            functionsMap.setdefault(name, ptr + self.offset)
+            print("[*] recordSym ---> {}\t{} ---> {}".format(str(name).ljust(25, " "), hex(ptr).ljust(10, " "),
+                                                             hex(ptr + self.offset)))
+        else:
+            functionsMap.setdefault(name, ptr)
+            print("[*] recordSym ---> {}\t{}".format(str(name).ljust(15, " "), hex(ptr)))
 
-    def save(self):
-        self.lf_1.write(self.savePath)
-        return self.savePath
+    def recordSymbols(self, maps):
+        for name in maps.keys():
+            self.recordSymbol(name, maps.get(name))
 
-
-if __name__ == '__main__':
-    # so 合并以及导出我们需要用到地址
-    ins = MergeUtils(r"C:\Users\pc\PycharmProjects\SoInject\files\libil2cpp.so",
-                     r"C:\Users\pc\AndroidStudioProjects\liefInject\app\release\libinject.so")
-    ins.mergeSection(".inject")
-    # ins.mergeSeg()
-
-    functionsMap.setdefault("GLOBAL_TABLE", ins.getSym2("GLOBAL_TABLE"))
-    functionsMap.setdefault("STR_TABLE", ins.getSym2("STR_TABLE"))
-    functionsMap.setdefault("trampolines", ins.getSym2("trampolines"))
-    functionsMap.setdefault("textCodes", ins.getSym2("textCodes"))
-
-    functionsMap.setdefault("SettingsMenuIn", 0x5475D8)
-
-    print("\n")
-    for item in functionsMap.items():
-        print("[*] "+item[0] + " ---> " + hex(item[1]))
-
-    newSoPath = ins.save()
-
-    ins = Jumper(newSoPath)
-    ins.addPtr(100)
-    ins.addPtr(200)
-    ins.addPtr(300)
-    ins.getStr("this is a test string!")
-    ins.getStr("测试文本文件")
-
-    ins.addHook(functionsMap.get("SettingsMenuIn"))
-    ins.android_log_print(msg="called this function")
-    ins.endHook()
-
-    ins.save()
+    def save(self, name="libil2cppN.so"):
+        savePath = os.path.dirname(self.path1) + "/" + name
+        self.lf_1.write(savePath)
+        return savePath
