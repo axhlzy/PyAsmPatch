@@ -4,6 +4,7 @@ Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) files
  详见：
  https://www.jianshu.com/p/915a512fd7e9
  
+```
 [*] mergeSection => .inject => 0x38e0000
 [*] GLOBAL_TABLE ---> 0x38e16e8
 [*] STR_TABLE ---> 0x38e187c
@@ -20,3 +21,4 @@ Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) files
 [*] Create string at 0x38e188f	测试文本文件
 [*] Create string at 0x38e18a2	ZZZ
 [*] Create string at 0x38e18a6	called this function
+```
