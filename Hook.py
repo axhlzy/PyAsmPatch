@@ -2,7 +2,7 @@
 #  @Author      lzy <axhlzy@live.cn>
 #  @HomePage    https://github.com/axhlzy
 #  @CreatedTime 2021/09/30 18:42
-#  @UpdateTime  2021/10/08 19:06
+#  @UpdateTime  2021/10/09 19:05
 #  @Des         Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) files
 #
 
@@ -240,11 +240,18 @@ class JumperBase:
         if resetPC:
             self.currentPC = toAddress
 
-    def loadToReg(self, pData, reg="R0"):
+    def loadToReg(self, mPtr, reg="R0"):
         self.patchASM("LDR {}, [PC,#4]".format(reg))
         self.patchASM("ADD {}, PC, {}".format(reg, reg))
         self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
-        self.patchList(self.calOffsetToList(self.currentPC - 4, pData, 0))
+        self.patchList(self.calOffsetToList(self.currentPC - 4, mPtr, 0))
+
+    def saveRegToMem(self, reg="R0", mPtr=0x0, tReg="R12"):
+        self.patchASM("LDR {}, [PC,#8]".format(tReg))
+        self.patchASM("ADD {}, PC, {}".format(tReg, tReg))
+        self.patchASM("STR {}, [{}]".format(reg, tReg))
+        self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
+        self.patchList(self.calOffsetToList(self.currentPC - 4, mPtr, 0))
 
     def addPtr(self, mPtr):
         # 保存jumper中的_currentPC
@@ -261,6 +268,7 @@ class JumperBase:
         self.currentPC = self._lastPC
         # 记录在在字典中 mapPtr
         self.mapPtr.setdefault(tmpAddr, mPtr)
+        print("[*] Added Ptr {} ---> {}".format(hex(tmpAddr),hex(mPtr)))
         return tmpAddr
 
     def getStr(self, mStr):
@@ -376,10 +384,46 @@ class UnityJumper(CommonBase):
     def __init__(self, filePath, ARCH=ARCH_ARM):
         CommonBase.__init__(self, filePath, ARCH=ARCH_ARM)
 
-    def getUnityStr(self, mStr):
+    # 存下来的是一个jStr，再真实需要用到的地方这个值应该被修复为csStr
+    def getJValueArray(self, *args):
+        # 四字节对齐
+        tmpCPC = self.currentPC
+        self.currentStr += (4 - self.currentStr % 4)
+        self.resetPC(self.currentStr)
+        tmpRetPtr = self.currentStr
+        self.addPtr(tmpRetPtr)
+        tmpList = [0x12, 0x34, 0x56, 0x78,
+                   0x00, 0x00, 0x00, 0x00,
+                   0x00, 0x00, 0x00, 0x00,
+                   eval(hex(len(args))), 0x00, 0x00, 0x00]
+        for index in range(0, len(args)):
+            # struct jValue只需要四字节，但是内存展现给我们的感觉是一个数组项占用了8字节，且前四字节似乎只是标识这个后面的四字节是否使用一样的感觉
+            tmpList.extend([0x1, 0x00, 0x00, 0x00])
+            if type(args[index]) is int:
+                tmpList.extend(self.calOffsetToList(0, args[index], 0))
+            elif type(args[index]) is str:
+                tmpList.extend(self.calOffsetToList(0, self.getStr(args[index]), 0))
+            elif type(args[index]) is bool:
+                tmpList.extend([0x1 if args[index] else 0x0, 0x00, 0x00, 0x00])
+        tmpList.extend([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])  # 0填充
+        self.patchList(tmpList)
+        self.currentStr = self.currentStr + len(tmpList)
+        print("[*] Create JValueArray {} ---> {}".format(hex(tmpRetPtr), tmpList))
+        self.currentPC = tmpCPC
+        return tmpRetPtr
+
+    def getUnityStr(self, mStr, ret=False):
+        # 汇编代码
         pStr = self.getStr(mStr)
         self.loadToReg(pStr, "R0")
         self.jumpTo(functionsMap.get("il2cpp_string_new"), jmpType="BL", resetPC=False)
+        if not ret:
+            return
+        # 后面部分是补充的供python脚本使用的部分代码
+        tmpPtr = self.addPtr(0)
+        self.saveRegToMem(reg="R0", mPtr=tmpPtr)
+        functionsMap.setdefault(mStr, tmpPtr)
+        return tmpPtr
 
     def FindClass(self, clsName):
         self.getUnityStr(clsName)
@@ -397,13 +441,17 @@ class UnityJumper(CommonBase):
         self.jumpTo(functionsMap.get("GetStaticMethodID"), jmpType="BL", resetPC=False)
         self.patchASM("MOV R5,R0")
 
-    def CallStaticVoidMethod(self, clsName, funcName, sign, args):
+    def CallStaticVoidMethod(self, clsName, funcName, sign, *args):
         self.FindClass(clsName)
         self.GetStaticMethodID(funcName, sign)
         self.patchASM("MOV R0,R4")
         self.patchASM("MOV R1,R5")
         # args operation
-        self.patchASM("MOV R2,#0")
+        if len(args) != 0:
+            self.loadToReg(self.getJValueArray(*args), reg="R2")
+        else:
+            # 不是用到args时一定得将R2写成0，不然R2之前可能有不可预期的值，进入Call之后对jValue解析就会崩溃
+            self.patchASM("MOV R2,#0")
         self.jumpTo(functionsMap.get("CallStaticVoidMethod"), jmpType="BL", resetPC=False)
 
 
@@ -445,7 +493,6 @@ class MergeUtils:
     # 合并指定节
     def mergeSection(self, section=".text"):
         # 添加了导出函数就会崩溃
-        # self.lf_1.add_exported_function(0x5465D8, "SettingsMenuIn")
         self.section = section
 
         # 先保存一下再打开重新回去vAddr
