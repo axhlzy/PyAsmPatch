@@ -2,13 +2,14 @@
 #  @Author      lzy <axhlzy@live.cn>
 #  @HomePage    https://github.com/axhlzy
 #  @CreatedTime 2021/09/30 18:42
-#  @UpdateTime  2021/10/09 19:05
+#  @UpdateTime  2021/10/12 10:31
 #  @Des         Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) files
 #
 
 import os
 import logging
 import sys
+from enum import Enum
 
 import lief
 import keystone
@@ -111,17 +112,19 @@ class JumperBase:
         self.lf.patch_address(self.currentPC, mList)
         self.currentPC += mList.__len__()
 
-    def patchASM(self, code="nop"):
-        self.patchList(self.ks.asm(code)[0])
+    def patchASM(self, asm="nop"):
+        self.patchList(self.ks.asm(asm)[0])
 
     def saveEnv(self):
         self.patchASM("push {r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr}")
-        self.patchASM("MRS R10, CPSR")
-        self.patchASM("STMFD SP!, {R10}")
+        self.patchASM("MRS R11, CPSR")
+        self.patchASM("MOV R12, SP")
+        self.patchASM("STMFD SP!, {R11,R12}")
+        self.patchASM("MOV R11,SP")
 
     def restoreEnv(self):
-        self.patchASM("LDMFD SP!, {R10}")
-        self.patchASM("MSR CPSR, R10")
+        self.patchASM("LDMFD SP!, {R11,R12}")
+        self.patchASM("MSR CPSR, R11")
         self.patchASM("pop {r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr}")
 
     def restoreCode(self, codeIndex=0):
@@ -268,7 +271,7 @@ class JumperBase:
         self.currentPC = self._lastPC
         # 记录在在字典中 mapPtr
         self.mapPtr.setdefault(tmpAddr, mPtr)
-        print("[*] Added Ptr {} ---> {}".format(hex(tmpAddr),hex(mPtr)))
+        # print("[*] Added Ptr {} ---> {}".format(hex(tmpAddr), hex(mPtr)))
         return tmpAddr
 
     def getStr(self, mStr):
@@ -321,9 +324,13 @@ class JumperBase:
         self.patchASM("ADD SP, SP, #{}".format(self._AllocSpSize))
 
     # 调用 addHook 之后 currentPC 指向了我们写代码的位置，写完了记得 “bl lr" 即可
-    def addHook(self, mPtr, jmpType="LDR"):
+    def addHook(self, mPtr, jmpType="LDR", printRegs=False):
         self.jumpTo(self.currentTramp, mPtr, codeIndex=0, jmpType=jmpType, reg="R12", resetPC=True, resetBackPC=True)
         self.saveEnv()
+        # 读取hook时候的registers
+        if printRegs:
+            self.jumpTo(self.getSymbolByName("readArgsReg"), jmpType="BL", resetPC=False)
+        # 跳转真实hook代码
         self.jumpTo(self.currentCodes, jmpType="BL", resetPC=False)
         self.restoreEnv()
         self.restoreCode(codeIndex=0)
@@ -334,6 +341,68 @@ class JumperBase:
 
     def endHook(self):
         self.patchASM("LDMFD SP!, {PC}")
+        self.currentCodes = self.currentPC
+
+    # 获取进入hook之前的寄存器值
+    # r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr, CPSR, SP
+    # CPSP SP r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr
+    def getArg(self, regIndex=0, toReg="R0", defFP="R11"):
+        index = 4 * (regIndex + 2)
+        if index > 4 * 17:
+            raise Exception("ArrayIndexOutOfBoundsException")
+        elif index == 4 * 15:
+            index = 0
+        elif index == 4 * 16:
+            index = 4 * 1
+        self.patchASM("LDR {},[{},#{}]".format(toReg, defFP, index))
+
+    # 修改进入hook之前的reg值(r0 write back to r12[regIndex])
+    def setArg(self, regIndex=0, fromReg="R0", defFP="R11"):
+        index = 4 * (regIndex + 1)
+        if index > 4 * 15:
+            raise Exception("ArrayIndexOutOfBoundsException")
+        elif index == 4 * 15:
+            index = 0
+        self.patchASM("STR {},[{},#{}]".format(fromReg, defFP, index))
+
+    def prepareStackArgs(self, canUseRegCount=4, *args):
+        pass
+
+    def getSymbolByName(self, name):
+        if functionsMap.get(str(name)) is None and name == "readArgsReg":
+            tmpPC = self.currentPC
+            self.resetPC(self.currentCodes)
+            self.recordSymbol("readArgsReg", self.currentPC)
+            self.patchASM("STMFD SP!, {LR}")
+            self.patchASM("SUB SP,SP,#{}".format(4 * 15))
+            # ANDROID_LOG_UNKNOWN = 0 ANDROID_LOG_DEFAULT = 1 ANDROID_LOG_VERBOSE = 2 ANDROID_LOG_DEBUG = 3 ANDROID_LOG_INFO = 4 ANDROID_LOG_WARN = 5 ANDROID_LOG_ERROR = 6 ANDROID_LOG_FATAL = 7 ANDROID_LOG_SILENT = 8
+            self.patchASM("MOV {},#{}".format("R0", 6))
+            # R0=>3 R1=>p"ZZZ" R2=>p"---> %p %p %p %p" R3=>R0 SP=>R1 SP,[#4]=>R2 SP,[#8]=>R3
+            self.loadToReg(self.getStr("ZZZ"), reg="R1")
+            self.loadToReg(self.getStr("\nRegisters ---> \nR0~R3:\t%p %p %p %p \nR4~R10:\t%p %p %p %p %p %p %p \nFP:%p IP:%p LR:%p SP:%p CPSR:%p"), reg="R2")
+            self.patchASM("ADD R3,R11,#{}".format(3*4))
+            self.patchASM("LDMIA R3,{R4,R5,R6,R7,R8,R9,r10}")
+            self.patchASM("STMIA SP,{R4,R5,R6,R7,R8,R9,r10}")
+            self.patchASM("ADD R3,R11,#{}".format(3*4 + 7*4))
+            self.patchASM("LDMIA R3,{R4,R5,R6,R7,R8,R9}")
+            self.patchASM("ADD R3,SP,#{}".format(7*4))
+            self.patchASM("STMIA R3,{R4,R5,R6,R7,R8,R9}")
+            self.getArg(regIndex=14, toReg="R4")
+            self.getArg(regIndex=13, toReg="R5")
+            self.patchASM("ADD R3,SP,#{}".format((6+7)*4))
+            self.patchASM("STMIA R3,{R4,R5}")
+            self.getArg(regIndex=0, toReg="R3")
+            self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg="R4", resetPC=False)
+            self.patchASM("ADD SP,SP,#{}".format(4 * 15))
+            self.patchASM("LDMFD SP!, {PC}")
+            self.currentCodes = self.currentPC
+            self.resetPC(tmpPC)
+        return functionsMap.get(str(name))
+
+    @staticmethod
+    def recordSymbol(name, ptr):
+        functionsMap.setdefault(name, ptr)
+        print("[*] recordSym ---> {}\t{}".format(str(name).ljust(15, " "), hex(ptr)))
 
 
 class CommonBase(JumperBase):
@@ -377,6 +446,13 @@ class CommonBase(JumperBase):
             pass
 
         self.jumpTo(mPtr, jmpType="BL", resetPC=False)
+
+    def addBP(self, mPtr):
+        tmpPC = self.currentPC
+        self.resetPC(mPtr)
+        # FE FF FF EA    死循环
+        self.patchASM("b #0")
+        self.resetPC(tmpPC)
 
 
 class UnityJumper(CommonBase):
@@ -456,8 +532,7 @@ class UnityJumper(CommonBase):
 
 
 class MergeUtils:
-    # 第二个so 合并到第一个so
-    def __init__(self, path1, path2):
+    def __init__(self, path1, path2=r"C:\Users\pc\AndroidStudioProjects\liefInject\app\release\libinject.so"):
         self.path1 = path1
         self.path2 = path2
         self.offset = None
@@ -518,17 +593,21 @@ class MergeUtils:
                     self.lf_2.get_symbol(symName).value - self.lf_2.get_section(self.section).virtual_address)
 
     def recordSymbol(self, name, ptr):
-        if str(name) not in ("GLOBAL_TABLE", "STR_TABLE", "trampolines", "textCodes"):
+        if str(name) in ("GLOBAL_TABLE", "STR_TABLE", "trampolines", "textCodes"):
+            functionsMap.setdefault(name, ptr)
+            print("[*] recordSym ---> {}\t{}".format(str(name).ljust(15, " "), hex(ptr)))
+        else:
             functionsMap.setdefault(name, ptr + self.offset)
             print("[*] recordSym ---> {}\t{} ---> {}".format(str(name).ljust(25, " "), hex(ptr).ljust(10, " "),
                                                              hex(ptr + self.offset)))
-        else:
-            functionsMap.setdefault(name, ptr)
-            print("[*] recordSym ---> {}\t{}".format(str(name).ljust(15, " "), hex(ptr)))
 
     def recordSymbols(self, maps):
         for name in maps.keys():
             self.recordSymbol(name, maps.get(name))
+
+    @staticmethod
+    def getSymbolByName(self, name):
+        return functionsMap.get("ShowSettings")
 
     def save(self, name="libil2cppN.so"):
         savePath = os.path.dirname(self.path1) + "/" + name
