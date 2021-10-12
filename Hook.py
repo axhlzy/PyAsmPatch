@@ -2,7 +2,7 @@
 #  @Author      lzy <axhlzy@live.cn>
 #  @HomePage    https://github.com/axhlzy
 #  @CreatedTime 2021/09/30 18:42
-#  @UpdateTime  2021/10/12 10:31
+#  @UpdateTime  2021/10/12 14:46
 #  @Des         Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) files
 #
 
@@ -249,12 +249,12 @@ class JumperBase:
         self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
         self.patchList(self.calOffsetToList(self.currentPC - 4, mPtr, 0))
 
-    def saveRegToMem(self, reg="R0", mPtr=0x0, tReg="R12"):
-        self.patchASM("LDR {}, [PC,#8]".format(tReg))
-        self.patchASM("ADD {}, PC, {}".format(tReg, tReg))
-        self.patchASM("STR {}, [{}]".format(reg, tReg))
+    def saveRegToMem(self, fromReg="R0", toPtr=0x0, tmpReg="R12"):
+        self.patchASM("LDR {}, [PC,#8]".format(tmpReg))
+        self.patchASM("ADD {}, PC, {}".format(tmpReg, tmpReg))
+        self.patchASM("STR {}, [{}]".format(fromReg, tmpReg))
         self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
-        self.patchList(self.calOffsetToList(self.currentPC - 4, mPtr, 0))
+        self.patchList(self.calOffsetToList(self.currentPC - 4, toPtr, 0))
 
     def addPtr(self, mPtr):
         # 保存jumper中的_currentPC
@@ -365,8 +365,14 @@ class JumperBase:
             index = 0
         self.patchASM("STR {},[{},#{}]".format(fromReg, defFP, index))
 
-    def prepareStackArgs(self, canUseRegCount=4, *args):
-        pass
+    def saveRegToStack(self, reg="R0", index=0):
+        self.patchASM("STR {},[SP,#{}]".format(reg, self._pSize * index))
+
+    def prepareStack(self, useSpCount=10):
+        self.patchASM("SUB SP,SP,#{}".format(self._pSize * useSpCount))
+
+    def restoreStack(self, useSpCount=10):
+        self.patchASM("ADD SP,SP,#{}".format(self._pSize * useSpCount))
 
     def getSymbolByName(self, name):
         if functionsMap.get(str(name)) is None and name == "readArgsReg":
@@ -374,26 +380,28 @@ class JumperBase:
             self.resetPC(self.currentCodes)
             self.recordSymbol("readArgsReg", self.currentPC)
             self.patchASM("STMFD SP!, {LR}")
-            self.patchASM("SUB SP,SP,#{}".format(4 * 15))
+            self.prepareStack(15)
             # ANDROID_LOG_UNKNOWN = 0 ANDROID_LOG_DEFAULT = 1 ANDROID_LOG_VERBOSE = 2 ANDROID_LOG_DEBUG = 3 ANDROID_LOG_INFO = 4 ANDROID_LOG_WARN = 5 ANDROID_LOG_ERROR = 6 ANDROID_LOG_FATAL = 7 ANDROID_LOG_SILENT = 8
             self.patchASM("MOV {},#{}".format("R0", 6))
             # R0=>3 R1=>p"ZZZ" R2=>p"---> %p %p %p %p" R3=>R0 SP=>R1 SP,[#4]=>R2 SP,[#8]=>R3
             self.loadToReg(self.getStr("ZZZ"), reg="R1")
-            self.loadToReg(self.getStr("\nRegisters ---> \nR0~R3:\t%p %p %p %p \nR4~R10:\t%p %p %p %p %p %p %p \nFP:%p IP:%p LR:%p SP:%p CPSR:%p"), reg="R2")
-            self.patchASM("ADD R3,R11,#{}".format(3*4))
+            self.loadToReg(self.getStr(
+                "\nRegisters ---> \nR0~R3:\t%p %p %p %p \nR4~R10:\t%p %p %p %p %p %p %p \nFP:%p IP:%p LR:%p SP:%p CPSR:%p"),
+                           reg="R2")
+            self.patchASM("ADD R3,R11,#{}".format(3 * 4))
             self.patchASM("LDMIA R3,{R4,R5,R6,R7,R8,R9,r10}")
             self.patchASM("STMIA SP,{R4,R5,R6,R7,R8,R9,r10}")
-            self.patchASM("ADD R3,R11,#{}".format(3*4 + 7*4))
+            self.patchASM("ADD R3,R11,#{}".format(3 * 4 + 7 * 4))
             self.patchASM("LDMIA R3,{R4,R5,R6,R7,R8,R9}")
-            self.patchASM("ADD R3,SP,#{}".format(7*4))
+            self.patchASM("ADD R3,SP,#{}".format(7 * 4))
             self.patchASM("STMIA R3,{R4,R5,R6,R7,R8,R9}")
             self.getArg(regIndex=14, toReg="R4")
             self.getArg(regIndex=13, toReg="R5")
-            self.patchASM("ADD R3,SP,#{}".format((6+7)*4))
+            self.patchASM("ADD R3,SP,#{}".format((6 + 7) * 4))
             self.patchASM("STMIA R3,{R4,R5}")
             self.getArg(regIndex=0, toReg="R3")
             self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg="R4", resetPC=False)
-            self.patchASM("ADD SP,SP,#{}".format(4 * 15))
+            self.restoreStack(15)
             self.patchASM("LDMFD SP!, {PC}")
             self.currentCodes = self.currentPC
             self.resetPC(tmpPC)
@@ -409,6 +417,26 @@ class CommonBase(JumperBase):
     def __init__(self, filePath, ARCH=ARCH_ARM):
         JumperBase.__init__(self, filePath, ARCH=ARCH_ARM)
 
+    # 修改PC附近RWX
+    def mprotect(self, mPtr=None, size=4096, prot=7, log=False):
+        if mPtr is None:
+            self.patchASM("MOV R2,PC")
+        else:
+            self.loadToReg(self.addPtr(mPtr), reg="R2")
+        self.prepareStack(3)
+        self.patchASM("MOV R1,R2,LSR#12")
+        self.patchASM("MOV R0,R1,LSL#12")
+        self.saveRegToStack(reg="R0", index=0)
+        self.patchASM("MOV R1,#{}".format(size))
+        self.saveRegToStack(reg="R1", index=1)
+        self.patchASM("MOV R2,#{}".format(prot))
+        self.saveRegToStack(reg="R2", index=2)
+        self.jumpTo(self.getRelocation("mprotect"), jmpType="REL", reg="R3", resetPC=False)
+        self.patchASM("MOV R3,R0")
+        if log:
+            self.android_log_print_reg(formart=" mProtect ret = %d  args : %p %p %p")
+        self.restoreStack(3)
+
     def strcmp(self, str0, str1, reg0="R0", reg1="R1"):
         if str(str0).startswith("R"):
             # str0 填写 register 的情况
@@ -422,11 +450,18 @@ class CommonBase(JumperBase):
             self.loadToReg(self.getStr(str1), reg=reg1)
         self.jumpTo(self.getRelocation("strcmp"), jmpType="REL", reg="R3", resetPC=False)
 
-    def android_log_print(self, prio=3, tag="ZZZ", msg="Called", reg0="R1", reg1="R2", reg2="R3"):
+    def android_log_print_msg(self, prio=3, tag="ZZZ", msg="Called"):
         self.patchASM("MOV R0, #{}".format(prio))
-        self.loadToReg(self.getStr(tag), reg=reg0)
-        self.loadToReg(self.getStr(msg), reg=reg1)
-        self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg=reg2, resetPC=False)
+        self.loadToReg(self.getStr(tag), reg="R1")
+        self.loadToReg(self.getStr(msg), reg="R2")
+        self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg="R3", resetPC=False)
+
+    # 依次对R3,sp,sp#4,sp#8... 进行参数传递
+    def android_log_print_reg(self, prio=3, tag="ZZZ", formart="---> %p"):
+        self.patchASM("MOV R0, #{}".format(prio))
+        self.loadToReg(self.getStr(tag), reg="R1")
+        self.loadToReg(self.getStr(formart), reg="R2")
+        self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg="R4", resetPC=False)
 
     def CallFunction(self, mPtr, *args):
 
@@ -459,6 +494,12 @@ class UnityJumper(CommonBase):
 
     def __init__(self, filePath, ARCH=ARCH_ARM):
         CommonBase.__init__(self, filePath, ARCH=ARCH_ARM)
+        self.hookInitArray()
+
+    def hookInitArray(self):
+        self.addHook(self.lf.ctor_functions[0].value, jmpType="B")
+        self.mprotect(log=True)
+        self.endHook()
 
     # 存下来的是一个jStr，再真实需要用到的地方这个值应该被修复为csStr
     def getJValueArray(self, *args):
@@ -497,7 +538,7 @@ class UnityJumper(CommonBase):
             return
         # 后面部分是补充的供python脚本使用的部分代码
         tmpPtr = self.addPtr(0)
-        self.saveRegToMem(reg="R0", mPtr=tmpPtr)
+        self.saveRegToMem(fromReg="R0", toPtr=tmpPtr)
         functionsMap.setdefault(mStr, tmpPtr)
         return tmpPtr
 
