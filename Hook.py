@@ -2,14 +2,13 @@
 #  @Author      lzy <axhlzy@live.cn>
 #  @HomePage    https://github.com/axhlzy
 #  @CreatedTime 2021/09/30 18:42
-#  @UpdateTime  2021/10/12 14:46
+#  @UpdateTime  2021/10/14 10:32
 #  @Des         Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) files
 #
 
 import os
 import logging
 import sys
-from enum import Enum
 
 import lief
 import keystone
@@ -26,6 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 functionsMap = {}
+injectSize: int = 4096
 
 
 class JumperBase:
@@ -227,6 +227,15 @@ class JumperBase:
                 print("\t" + hex(tmpPC + 4 * 2) + " " + tmpSrcCode[2]
                       + "\t\t\t    \t" + str(listPatch) + "  " + listStr)
 
+        def JMP_REG():
+            SaveCode()
+            self._returnAddr = self.currentPC + self._pSize * 5
+            self.patchASM("LDR {},[PC,#4]".format(reg))
+            self.patchASM("ADD PC,{}".format(reg))
+            self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
+            self.patchList(self.calOffsetToList(self.currentPC - 4, toAddress))  # 起点算的是pc的位置(上一条)，而不是当前位置
+            self.patchASM("BLX R11")
+
         def JMP_REL():
             self.patchASM("LDR {}, [PC,#0xC]".format(reg))
             self.patchASM("ADD {}, PC, {}".format(reg, reg))
@@ -235,8 +244,9 @@ class JumperBase:
             self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
             self.patchList(self.calOffsetToList(self.currentPC - 8, toAddress, 0))
 
-        switch = {'LDR': JMP_LDA,
-                  'REL': JMP_REL,
+        switch = {'LDR': JMP_LDA,  # 远距离的B
+                  'REG': JMP_REG,  # 远距离的BL
+                  'REL': JMP_REL,  # 跳转GOT
                   'BL': JMP_BL,
                   'B': JMP_B}
         switch.get(jmpType, JMP_B)()
@@ -387,7 +397,7 @@ class JumperBase:
             self.loadToReg(self.getStr("ZZZ"), reg="R1")
             self.loadToReg(self.getStr(
                 "\nRegisters ---> \nR0~R3:\t%p %p %p %p \nR4~R10:\t%p %p %p %p %p %p %p \nFP:%p IP:%p LR:%p SP:%p CPSR:%p"),
-                           reg="R2")
+                reg="R2")
             self.patchASM("ADD R3,R11,#{}".format(3 * 4))
             self.patchASM("LDMIA R3,{R4,R5,R6,R7,R8,R9,r10}")
             self.patchASM("STMIA SP,{R4,R5,R6,R7,R8,R9,r10}")
@@ -493,12 +503,22 @@ class CommonBase(JumperBase):
 class UnityJumper(CommonBase):
 
     def __init__(self, filePath, ARCH=ARCH_ARM):
-        CommonBase.__init__(self, filePath, ARCH=ARCH_ARM)
+        CommonBase.__init__(self, filePath, ARCH=ARCH)
         self.hookInitArray()
 
     def hookInitArray(self):
-        self.addHook(self.lf.ctor_functions[0].value, jmpType="B")
-        self.mprotect(log=True)
+        # 修改权限
+        try:
+            self.addHook(self.lf.ctor_functions[0].value, jmpType="B")
+        except:
+            self.addHook(self.lf.ctor_functions[0].value, jmpType="LDR")
+        self.mprotect(log=True, size=injectSize)
+
+        # todo 挨着修复我们填写的值
+        # 代码执行到这里的时候我们知道当前的pc值以及当前代码静态的地址，所以我们相减即可得到当前的so基地址
+        self.loadToReg(functionsMap.get("BSS_TABLE"), reg="R0")
+        self.patchASM("")
+
         self.endHook()
 
     # 存下来的是一个jStr，再真实需要用到的地方这个值应该被修复为csStr
@@ -593,6 +613,7 @@ class MergeUtils:
         # 记录合并后需要用到的导出地址
         self.recordSymbol("GLOBAL_TABLE", self.getSym2("GLOBAL_TABLE"))
         self.recordSymbol("STR_TABLE", self.getSym2("STR_TABLE"))
+        self.recordSymbol("BSS_TABLE", self.getSym2("BSS_TABLE"))
         self.recordSymbol("trampolines", self.getSym2("trampolines"))
         self.recordSymbol("textCodes", self.getSym2("textCodes"))
         print("\n")
@@ -618,6 +639,7 @@ class MergeUtils:
         retPath = self.save("libil2cpp_merge.so")
 
         self.offset = self.text.virtual_address - tempOff
+        injectSize = self.text.size
         self.vAddr = self.lf_1.get_section(section).virtual_address
         print("[*] mergeSection => " + section + " => " + str(hex(self.vAddr)) + "\n")
         self.recordCommon()
