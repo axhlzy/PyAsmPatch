@@ -2,8 +2,8 @@
 #  @Author      lzy <axhlzy@live.cn>
 #  @HomePage    https://github.com/axhlzy
 #  @CreatedTime 2021/09/30 18:42
-#  @UpdateTime  2021/10/14 10:32
-#  @Des         Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) files
+#  @UpdateTime  2021/10/14 18:52
+#  @Des         Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) file
 #
 
 import os
@@ -25,7 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 functionsMap = {}
-injectSize: int = 4096
+gotMap = {}
 
 
 class JumperBase:
@@ -40,6 +40,7 @@ class JumperBase:
         self.currentPC = 0
         self.currentPtr = functionsMap.get("GLOBAL_TABLE")
         self.currentStr = functionsMap.get("STR_TABLE")
+        self.currentGOT = functionsMap.get("GOT_TABLE")
         self.currentTramp = functionsMap.get("trampolines")
         self.currentCodes = functionsMap.get("textCodes")
 
@@ -201,6 +202,14 @@ class JumperBase:
                 print("\t" + hex(tmpPC) + " " + self.getAsmFromList(self._codeContainer[codeIndex])[0]
                       + "\t--->\t" + self.getAsmFromAddress(tmpPC)[0])
 
+        def JMP_BEQ():
+            checkJmpRange()
+            self.patchASM("BEQ #{}".format(self.calOffset(self.currentPC - 4 * 2, toAddress)))
+
+        def JMP_BNE():
+            checkJmpRange()
+            self.patchASM("BNE #{}".format(self.calOffset(self.currentPC - 4 * 2, toAddress)))
+
         def JMP_LDA():
             SaveCode()
             self._returnAddr = self.currentPC + self._pSize * 3
@@ -247,17 +256,19 @@ class JumperBase:
         switch = {'LDR': JMP_LDA,  # 远距离的B
                   'REG': JMP_REG,  # 远距离的BL
                   'REL': JMP_REL,  # 跳转GOT
+                  'BEQ': JMP_BEQ,
+                  'BNE': JMP_BNE,
                   'BL': JMP_BL,
                   'B': JMP_B}
         switch.get(jmpType, JMP_B)()
         if resetPC:
             self.currentPC = toAddress
 
-    def loadToReg(self, mPtr, reg="R0"):
+    def loadToReg(self, mPtr, reg="R0", fix=0):
         self.patchASM("LDR {}, [PC,#4]".format(reg))
         self.patchASM("ADD {}, PC, {}".format(reg, reg))
         self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
-        self.patchList(self.calOffsetToList(self.currentPC - 4, mPtr, 0))
+        self.patchList(self.calOffsetToList(self.currentPC - 4, mPtr, fix))
 
     def saveRegToMem(self, fromReg="R0", toPtr=0x0, tmpReg="R12"):
         self.patchASM("LDR {}, [PC,#8]".format(tmpReg))
@@ -282,6 +293,17 @@ class JumperBase:
         # 记录在在字典中 mapPtr
         self.mapPtr.setdefault(tmpAddr, mPtr)
         # print("[*] Added Ptr {} ---> {}".format(hex(tmpAddr), hex(mPtr)))
+        return tmpAddr
+
+    def addGOT(self, mPtr, des=None):
+        self._lastPC = self.currentPC
+        self.resetPC(self.currentGOT)
+        tmpAddr = self.currentGOT
+        self.patchList(self.calOffsetToList(0, mPtr))
+        self.currentGOT = self.currentPC
+        self.currentPC = self._lastPC
+        tmpKey = mPtr if des is None else des
+        gotMap.setdefault(tmpKey, tmpAddr)
         return tmpAddr
 
     def getStr(self, mStr):
@@ -395,8 +417,10 @@ class JumperBase:
             self.patchASM("MOV {},#{}".format("R0", 6))
             # R0=>3 R1=>p"ZZZ" R2=>p"---> %p %p %p %p" R3=>R0 SP=>R1 SP,[#4]=>R2 SP,[#8]=>R3
             self.loadToReg(self.getStr("ZZZ"), reg="R1")
+            # todo record pc
             self.loadToReg(self.getStr(
-                "\nRegisters ---> \nR0~R3:\t%p %p %p %p \nR4~R10:\t%p %p %p %p %p %p %p \nFP:%p IP:%p LR:%p SP:%p CPSR:%p"),
+                "\nBreak at {} Registers ---> \nR0~R3:\t%p %p %p %p \nR4~R10:\t%p %p %p %p %p %p %p \nFP:%p IP:%p LR:%p SP:%p CPSR:%p".format(
+                    hex(0))),
                 reg="R2")
             self.patchASM("ADD R3,R11,#{}".format(3 * 4))
             self.patchASM("LDMIA R3,{R4,R5,R6,R7,R8,R9,r10}")
@@ -444,7 +468,7 @@ class CommonBase(JumperBase):
         self.jumpTo(self.getRelocation("mprotect"), jmpType="REL", reg="R3", resetPC=False)
         self.patchASM("MOV R3,R0")
         if log:
-            self.android_log_print_reg(formart=" mProtect ret = %d  args : %p %p %p")
+            self.android_log_print_reg(formart="mprotect ret = %d  args : %p %p %p")
         self.restoreStack(3)
 
     def strcmp(self, str0, str1, reg0="R0", reg1="R1"):
@@ -509,16 +533,45 @@ class UnityJumper(CommonBase):
     def hookInitArray(self):
         # 修改权限
         try:
-            self.addHook(self.lf.ctor_functions[0].value, jmpType="B")
+            self.addHook(self.lf.ctor_functions[0].value, jmpType="B", printRegs=True)
         except:
             self.addHook(self.lf.ctor_functions[0].value, jmpType="LDR")
-        self.mprotect(log=True, size=injectSize)
 
-        # todo 挨着修复我们填写的值
+        # 这个size其实可以填的很大，即使返回了-1，但是它是按照页来修改访问属性的，问题不大，所以返回-1表示我们已经覆盖了全部（超出了）
+        self.mprotect(mPtr=functionsMap.get("GOT_TABLE"), size=1024*8,  log=True)
+
+        # 获取 il2cpp base address
         # 代码执行到这里的时候我们知道当前的pc值以及当前代码静态的地址，所以我们相减即可得到当前的so基地址
-        self.loadToReg(functionsMap.get("BSS_TABLE"), reg="R0")
-        self.patchASM("")
+        self.loadToReg(self.addPtr(self.currentPC + 7 * self._pSize), reg="R1", fix=1)
+        self.patchASM("LDR R2,[R1]")
+        self.patchASM("SUB R0,PC,R2")
+        self.patchASM("MOV R3,R0")
+        self.patchASM("MOV R9,R0")
+        self.android_log_print_reg(formart="soAddr -> %p")
 
+        # 挨着修复我们填写的值
+        # while(GOT_TABLE[index]!=0x0){
+        #       GOT_TABLE[index] += soAddr
+        # }
+        self.prepareStack(2)
+        self.loadToReg(functionsMap.get("GOT_TABLE"), reg="R5", fix=1)
+        self.patchASM("MOV R7,#0")
+        # R5:存放指针 R6:存放具体值 R7:存放偏移 R8:CurrentPtr
+        self.patchASM("ADD R8,R5,R7")
+        self.patchASM("LDR R6,[R8]")
+        self.patchASM("CMP R6,#0")
+        # 标识结束，直接跳转到 endHook
+        self.jumpTo(self.currentPC + self._pSize * 23, jmpType="BEQ", resetPC=False)
+        self.patchASM("MOV R3,R8")
+        self.saveRegToStack(reg="R6", index=0)
+        self.patchASM("ADD R6,R6,R9")
+        self.saveRegToStack(reg="R6", index=1)
+        self.android_log_print_reg(formart="GOT relocation %p ---> %p ---> %p")
+        self.patchASM("STR R6,[R8]")
+        self.patchASM("ADD R7,R7,#4")
+        self.jumpTo(self.currentPC - self._pSize * 25, jmpType="B", resetPC=False)
+
+        self.restoreStack(2)
         self.endHook()
 
     # 存下来的是一个jStr，再真实需要用到的地方这个值应该被修复为csStr
@@ -613,7 +666,7 @@ class MergeUtils:
         # 记录合并后需要用到的导出地址
         self.recordSymbol("GLOBAL_TABLE", self.getSym2("GLOBAL_TABLE"))
         self.recordSymbol("STR_TABLE", self.getSym2("STR_TABLE"))
-        self.recordSymbol("BSS_TABLE", self.getSym2("BSS_TABLE"))
+        self.recordSymbol("GOT_TABLE", self.getSym2("GOT_TABLE"))
         self.recordSymbol("trampolines", self.getSym2("trampolines"))
         self.recordSymbol("textCodes", self.getSym2("textCodes"))
         print("\n")
@@ -631,6 +684,13 @@ class MergeUtils:
     def mergeSection(self, section=".text"):
         # 添加了导出函数就会崩溃
         self.section = section
+
+        tmpList = []
+        for index in range(0, 100):
+            tmpList += [0x0, 0x0, 0x0, 0x0]
+        self.lf_2.patch_address(self.lf_2.get_symbol("GOT_TABLE").value, tmpList)
+        self.lf_2.write(r"C:\Users\pc\AndroidStudioProjects\liefInject\app\release\libinjectTMP.so")
+        self.lf_2 = lief.parse(r"C:\Users\pc\AndroidStudioProjects\liefInject\app\release\libinjectTMP.so")
 
         # 先保存一下再打开重新回去vAddr
         self.text = self.text
@@ -656,7 +716,7 @@ class MergeUtils:
                     self.lf_2.get_symbol(symName).value - self.lf_2.get_section(self.section).virtual_address)
 
     def recordSymbol(self, name, ptr):
-        if str(name) in ("GLOBAL_TABLE", "STR_TABLE", "trampolines", "textCodes"):
+        if str(name) in ("GLOBAL_TABLE", "STR_TABLE", "trampolines", "textCodes", "GOT_TABLE"):
             functionsMap.setdefault(name, ptr)
             print("[*] recordSym ---> {}\t{}".format(str(name).ljust(15, " "), hex(ptr)))
         else:
@@ -669,8 +729,8 @@ class MergeUtils:
             self.recordSymbol(name, maps.get(name))
 
     @staticmethod
-    def getSymbolByName(self, name):
-        return functionsMap.get("ShowSettings")
+    def getSymbolByName(name):
+        return functionsMap.get(name)
 
     def save(self, name="libil2cppN.so"):
         savePath = os.path.dirname(self.path1) + "/" + name
