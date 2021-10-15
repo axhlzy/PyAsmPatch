@@ -18,7 +18,7 @@ if __name__ == '__main__':
     ins.android_log_print_msg(msg="描述 : called this function")
     # android_log_print_reg 从R3开始,多余的参数使用堆栈传参 prepareStack saveRegToStack restoreStack
     # 以下为一个简单的demo 几句话即可完成 log 带堆栈传参的调用    
-    ins.loadToReg(ins.addPtr(ins.getSymbolByName("UI_Splash")), reg="R3", fix=1)
+    ins.loadToReg(ins.addPtr(ins.getSymbolByName("UI_Splash")), reg="R3")
     ins.patchASM("LDR R3,[R3]")
     ins.loadToReg(ins.getStr("UI_Splash"), reg="R4")
     ins.prepareStack(1)
