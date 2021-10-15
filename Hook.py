@@ -2,7 +2,7 @@
 #  @Author      lzy <axhlzy@live.cn>
 #  @HomePage    https://github.com/axhlzy
 #  @CreatedTime 2021/09/30 18:42
-#  @UpdateTime  2021/10/15 15:14
+#  @UpdateTime  2021/10/15 16:21
 #  @Des         Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) file
 #
 
@@ -300,7 +300,7 @@ class JumperBase:
         if resetPC:
             self.currentPC = toAddress
 
-    def loadToReg(self, mPtr, reg="R0", fix=0):
+    def loadToReg(self, mPtr, reg="R0", fix=1):
         self.patchASM("LDR {}, [PC,#4]".format(reg))
         self.patchASM("ADD {}, PC, {}".format(reg, reg))
         self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
@@ -363,7 +363,7 @@ class JumperBase:
         # 修改jumper中的保存jumper中的currentPC指向 STR_TABLE 当前位置
         self.resetPC(self.currentStr)
         # 临时记录 currentPtr 字符串开始位置
-        tmpAddr = self.currentStr - self._pSize
+        tmpAddr = self.currentStr
         # 存入String的值
         self.patchList(listStr)
         # 记录在在字典中 mapStr
@@ -514,7 +514,7 @@ class CommonBase(JumperBase):
     # 获取 il2cpp base address
     # 代码执行到这里的时候我们知道当前的pc值以及当前代码静态的地址，所以我们相减即可得到当前的so基地址
     def loadBaseToReg(self, reg="R4", log=False):
-        self.loadToReg(self.addPtr(self.currentPC + 7 * self._pSize), reg="R1", fix=1)
+        self.loadToReg(self.addPtr(self.currentPC + 7 * self._pSize), reg="R1")
         self.patchASM("LDR R2,[R1]")
         self.patchASM("SUB R0,PC,R2")
         self.patchASM("MOV {},R0".format(reg))
@@ -527,7 +527,7 @@ class CommonBase(JumperBase):
     # }
     def relocationGot(self, reg="R9"):
         self.prepareStack(2)
-        self.loadToReg(functionsMap.get("GOT_TABLE"), reg="R5", fix=1)
+        self.loadToReg(functionsMap.get("GOT_TABLE"), reg="R5")
         self.patchASM("MOV R7,#0")
         self.patchASM("MOV R10,#0")
         # R5:存放指针 R6:存放具体值 R7:存放偏移 R8:CurrentPtr
@@ -656,7 +656,7 @@ class UnityJumper(CommonBase):
             if type(args[index]) is int:
                 tmpList.extend(self.calOffsetToList(0, args[index], 0))
             elif type(args[index]) is str:
-                tmpList.extend(self.calOffsetToList(0, self.getStr(args[index]), 0))
+                tmpList.extend(self.calOffsetToList(0, self.getStr(args[index]), 4))
             elif type(args[index]) is bool:
                 tmpList.extend([0x1 if args[index] else 0x0, 0x00, 0x00, 0x00])
         tmpList.extend([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])  # 0填充
