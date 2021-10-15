@@ -634,9 +634,9 @@ class UnityJumper(CommonBase):
         if self.lf.ctor_functions[0] is None:
             raise Exception("There is no ctor_functions")
         try:
-            self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="B", printRegs=True)
+            self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="B", printRegs=False)
         except:
-            self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="LDR")
+            self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="LDR", printRegs=False)
         self.fixGot(log=log)
 
     def getJValueArray(self, *args):
@@ -753,8 +753,8 @@ class MergeUtils:
         for index in range(0, 100):
             tmpList += [0x0, 0x0, 0x0, 0x0]
         self.lf_2.patch_address(self.lf_2.get_symbol("GOT_TABLE").value, tmpList)
-        self.lf_2.write(r"C:\Users\pc\AndroidStudioProjects\liefInject\app\release\libinjectTMP.so")
-        self.lf_2 = lief.parse(r"C:\Users\pc\AndroidStudioProjects\liefInject\app\release\libinjectTMP.so")
+        self.lf_2.write(r"C:\Users\pc\AppData\Local\Temp\libinjectTMP.so")
+        self.lf_2 = lief.parse(r"C:\Users\pc\AppData\Local\Temp\libinjectTMP.so")
 
         # 先保存一下再打开重新回去vAddr
         self.text = self.text
