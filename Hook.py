@@ -2,7 +2,7 @@
 #  @Author      lzy <axhlzy@live.cn>
 #  @HomePage    https://github.com/axhlzy
 #  @CreatedTime 2021/09/30 18:42
-#  @UpdateTime  2021/10/14 18:52
+#  @UpdateTime  2021/10/15 15:14
 #  @Des         Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) file
 #
 
@@ -48,6 +48,7 @@ class JumperBase:
         self.mapStr = {}
 
         self._pSize = ARCH
+        self._fixLdrPC = {}
         self._AllocSpSize = 0
         self._lastPC = 0
         self._jumpBackPC = 0
@@ -91,10 +92,6 @@ class JumperBase:
             tmpList.reverse()
         return tmpList
 
-    def fixCode(self, insList):
-        # TODO 修复pc相关指令
-        return insList
-
     def ldrGenerator(self, loadAddress, register):
         pass
 
@@ -128,8 +125,34 @@ class JumperBase:
         self.patchASM("MSR CPSR, R11")
         self.patchASM("pop {r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr}")
 
-    def restoreCode(self, codeIndex=0):
-        self.patchList(self.fixCode(self._codeContainer[codeIndex]))
+    def restoreCode(self, codeIndex=0, fromAddress=0):
+        tmp = self._fixLdrPC.get("fixLdrPC_{}".format(fromAddress))
+        if tmp is not None:
+            tmpInsList = self.getAsmFromList(self._codeContainer[codeIndex])
+            for index in range(0, len(tmpInsList)):
+                item = tmpInsList[index]
+                if item.find("ldr") != -1 and item.find("pc") != -1:
+                    tmpReg = item[item.find("ldr ")+4:item.find(", [")]
+                    self.patchASM("LDR {}, [PC,#0]".format(tmpReg))
+                    self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
+                    self.patchList(self.calOffsetToList(self.currentPC - 4, tmp, 1))
+                # 修复 BL
+                elif item.find("BL") != -1:
+                    # [31:28]位是条件码
+                    # [27: 24]位为"1010"(0xeaffffff为一条指令的二进制机器码)时，表示B跳转指令
+                    # [23: 0] 表示一个相对于PC的偏移地址
+                    # todo
+                    pass
+                elif item.find("BLX") != -1:
+                    # todo
+                    pass
+                elif item.find("B") != -1:
+                    # todo
+                    pass
+                else:
+                    self.patchASM(item)
+        else:
+            self.patchList(self._codeContainer[codeIndex])
 
     def save(self, name=None):
         # 保存在传入so的目录下，未填写名称则默认在原名称后面添加一个N
@@ -172,6 +195,19 @@ class JumperBase:
                 if codeIndex != -1:
                     self._codeContainer[codeIndex] = self.lf.get_content_from_virtual_address(self.currentPC,
                                                                                               self._pSize * 3)
+            # fix     ldr pc -> ldr r12  from self._fixLdrPC
+            tmpInsList = self.getAsmFromList(self._codeContainer[codeIndex])
+            # tmpCodeContainer = []
+            for index in range(0, len(tmpInsList)):
+                item = tmpInsList[index]
+                if item.find("ldr") != -1 and item.find("pc") != -1:
+                    # tmpCodeContainer.extend(self.ks.asm(tmpInsList[index].replace("pc", "r12"))[0])
+                    tmpLdrPC = fromAddress + self._pSize * (index + 2) + eval(item[item.find("#") + 1:item.find("]")])
+                    self._fixLdrPC.setdefault("fixLdrPC_{}".format(fromAddress), tmpLdrPC)
+                else:
+                    pass
+                    # tmpCodeContainer.extend(self.ks.asm(tmpInsList[index])[0])
+            # self._codeContainer[codeIndex] = tmpCodeContainer
 
         def checkJmpRange():
             # B指令和BL指令最大跳转距离是 ±32M (bits[23:0]是立即数空间,指令最低两位都为 0,去除一个符号位，即为2^25)
@@ -365,7 +401,7 @@ class JumperBase:
         # 跳转真实hook代码
         self.jumpTo(self.currentCodes, jmpType="BL", resetPC=False)
         self.restoreEnv()
-        self.restoreCode(codeIndex=0)
+        self.restoreCode(codeIndex=0, fromAddress=mPtr)
         self.jumpTo(self._jumpBackPC, fromAddress=self.currentPC, jmpType=jmpType, reg="R12", resetPC=False)
         self.currentTramp = self.currentPC
         self.currentPC = self.currentCodes
@@ -442,6 +478,11 @@ class JumperBase:
         return functionsMap.get(str(name))
 
     @staticmethod
+    def getGotByName(name):
+        if name is not None:
+            return gotMap.get(str(name))
+
+    @staticmethod
     def recordSymbol(name, ptr):
         functionsMap.setdefault(name, ptr)
         print("[*] recordSym ---> {}\t{}".format(str(name).ljust(15, " "), hex(ptr)))
@@ -450,6 +491,63 @@ class JumperBase:
 class CommonBase(JumperBase):
     def __init__(self, filePath, ARCH=ARCH_ARM):
         JumperBase.__init__(self, filePath, ARCH=ARCH_ARM)
+        self.hookInit()
+
+    def hookInit(self, log=True):
+        if self.lf.ctor_functions[0] is None:
+            raise Exception("There is no ctor_functions")
+        # 修改权限
+        try:
+            self.addHook(self.lf.ctor_functions[0].value, jmpType="B", printRegs=True)
+        except:
+            self.addHook(self.lf.ctor_functions[0].value, jmpType="LDR")
+
+        # 这个size其实可以填的很大，即使返回了-1，但是它是按照页来修改访问属性的，问题不大，所以返回-1表示我们已经覆盖了全部（超出了）
+        self.fixGot(log=log)
+
+    def fixGot(self, log):
+        self.mprotect(mPtr=functionsMap.get("GOT_TABLE"), size=1024 * 8, log=log)
+        self.loadBaseToReg(reg="R9", log=True)
+        self.relocationGot(reg="R9")
+        self.endHook()
+
+    # 获取 il2cpp base address
+    # 代码执行到这里的时候我们知道当前的pc值以及当前代码静态的地址，所以我们相减即可得到当前的so基地址
+    def loadBaseToReg(self, reg="R4", log=False):
+        self.loadToReg(self.addPtr(self.currentPC + 7 * self._pSize), reg="R1", fix=1)
+        self.patchASM("LDR R2,[R1]")
+        self.patchASM("SUB R0,PC,R2")
+        self.patchASM("MOV {},R0".format(reg))
+        if log:
+            self.patchASM("MOV R3,R0")
+            self.android_log_print_reg(formart="soAddr -> %p")
+
+    # while(GOT_TABLE[index]!=0x0){
+    #       GOT_TABLE[index] += soAddr
+    # }
+    def relocationGot(self, reg="R9"):
+        self.prepareStack(2)
+        self.loadToReg(functionsMap.get("GOT_TABLE"), reg="R5", fix=1)
+        self.patchASM("MOV R7,#0")
+        self.patchASM("MOV R10,#0")
+        # R5:存放指针 R6:存放具体值 R7:存放偏移 R8:CurrentPtr
+        self.patchASM("ADD R8,R5,R7")
+        self.patchASM("LDR R6,[R8]")
+        self.patchASM("CMP R6,#0")
+        # 标识结束，直接跳转到 endHook
+        self.jumpTo(self.currentPC + self._pSize * 24, jmpType="BEQ", resetPC=False)
+        self.patchASM("MOV R3,R8")
+        self.patchASM("ADD R10,#1")
+        self.saveRegToStack(reg="R6", index=0)
+        self.patchASM("ADD R6,R6,{}".format(reg))
+        self.saveRegToStack(reg="R6", index=1)
+        self.android_log_print_reg(formart="GOT relocation %p ---> %p ---> %p")
+        self.patchASM("STR R6,[R8]")
+        self.patchASM("ADD R7,R7,#4")
+        self.jumpTo(self.currentPC - self._pSize * 26, jmpType="B", resetPC=False)
+        self.patchASM("MOV R3,R10")
+        self.android_log_print_reg(formart="Finished GOT relocation all:%d")
+        self.restoreStack(2)
 
     # 修改PC附近RWX
     def mprotect(self, mPtr=None, size=4096, prot=7, log=False):
@@ -528,53 +626,24 @@ class UnityJumper(CommonBase):
 
     def __init__(self, filePath, ARCH=ARCH_ARM):
         CommonBase.__init__(self, filePath, ARCH=ARCH)
-        self.hookInitArray()
+        # gotMap add Got Functions
+        for item in functionsMap.items():
+            self.addGOT(int(item[1]), item[0])
 
-    def hookInitArray(self):
+    def hookInit(self, log=True):
+        if self.lf.ctor_functions[0] is None:
+            raise Exception("There is no ctor_functions")
         # 修改权限
-        try:
-            self.addHook(self.lf.ctor_functions[0].value, jmpType="B", printRegs=True)
-        except:
-            self.addHook(self.lf.ctor_functions[0].value, jmpType="LDR")
+        # try:
+        #     self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="B", printRegs=True)
+        # except:
+        #     self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="LDR")
+        self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="LDR")
+        # self.addHook(self.lf.get_symbol("il2cpp_init").value+12, jmpType="B", printRegs=True)
 
         # 这个size其实可以填的很大，即使返回了-1，但是它是按照页来修改访问属性的，问题不大，所以返回-1表示我们已经覆盖了全部（超出了）
-        self.mprotect(mPtr=functionsMap.get("GOT_TABLE"), size=1024*8,  log=True)
+        self.fixGot(log=log)
 
-        # 获取 il2cpp base address
-        # 代码执行到这里的时候我们知道当前的pc值以及当前代码静态的地址，所以我们相减即可得到当前的so基地址
-        self.loadToReg(self.addPtr(self.currentPC + 7 * self._pSize), reg="R1", fix=1)
-        self.patchASM("LDR R2,[R1]")
-        self.patchASM("SUB R0,PC,R2")
-        self.patchASM("MOV R3,R0")
-        self.patchASM("MOV R9,R0")
-        self.android_log_print_reg(formart="soAddr -> %p")
-
-        # 挨着修复我们填写的值
-        # while(GOT_TABLE[index]!=0x0){
-        #       GOT_TABLE[index] += soAddr
-        # }
-        self.prepareStack(2)
-        self.loadToReg(functionsMap.get("GOT_TABLE"), reg="R5", fix=1)
-        self.patchASM("MOV R7,#0")
-        # R5:存放指针 R6:存放具体值 R7:存放偏移 R8:CurrentPtr
-        self.patchASM("ADD R8,R5,R7")
-        self.patchASM("LDR R6,[R8]")
-        self.patchASM("CMP R6,#0")
-        # 标识结束，直接跳转到 endHook
-        self.jumpTo(self.currentPC + self._pSize * 23, jmpType="BEQ", resetPC=False)
-        self.patchASM("MOV R3,R8")
-        self.saveRegToStack(reg="R6", index=0)
-        self.patchASM("ADD R6,R6,R9")
-        self.saveRegToStack(reg="R6", index=1)
-        self.android_log_print_reg(formart="GOT relocation %p ---> %p ---> %p")
-        self.patchASM("STR R6,[R8]")
-        self.patchASM("ADD R7,R7,#4")
-        self.jumpTo(self.currentPC - self._pSize * 25, jmpType="B", resetPC=False)
-
-        self.restoreStack(2)
-        self.endHook()
-
-    # 存下来的是一个jStr，再真实需要用到的地方这个值应该被修复为csStr
     def getJValueArray(self, *args):
         # 四字节对齐
         tmpCPC = self.currentPC
