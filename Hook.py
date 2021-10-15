@@ -595,7 +595,7 @@ class CommonBase(JumperBase):
         self.loadToReg(self.getStr(formart), reg="R2")
         self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg="R4", resetPC=False)
 
-    def CallFunction(self, mPtr, *args):
+    def callFunction(self, mPtr, *args):
 
         def load4Reg():
             for i in range(0, len(args)):
@@ -633,15 +633,10 @@ class UnityJumper(CommonBase):
     def hookInit(self, log=True):
         if self.lf.ctor_functions[0] is None:
             raise Exception("There is no ctor_functions")
-        # 修改权限
-        # try:
-        #     self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="B", printRegs=True)
-        # except:
-        #     self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="LDR")
-        self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="LDR")
-        # self.addHook(self.lf.get_symbol("il2cpp_init").value+12, jmpType="B", printRegs=True)
-
-        # 这个size其实可以填的很大，即使返回了-1，但是它是按照页来修改访问属性的，问题不大，所以返回-1表示我们已经覆盖了全部（超出了）
+        try:
+            self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="B", printRegs=True)
+        except:
+            self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="LDR")
         self.fixGot(log=log)
 
     def getJValueArray(self, *args):
