@@ -2,7 +2,7 @@
 #  @Author      lzy <axhlzy@live.cn>
 #  @HomePage    https://github.com/axhlzy
 #  @CreatedTime 2021/09/30 18:42
-#  @UpdateTime  2021/10/19 15:35
+#  @UpdateTime  2021/10/19 16:15
 #  @Des         Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) file
 #
 
@@ -176,14 +176,6 @@ class JumperBase:
             path = os.path.dirname(self.filePath) + "/" + name
         self.lf.write(path)
         return path
-
-    @staticmethod
-    def checkJmpRange(ptrFrom, ptrTo):
-        # B指令和BL指令最大跳转距离是 ±32M (bits[23:0]是立即数空间,指令最低两位都为 0,去除一个符号位，即为2^25)
-        if abs(ptrFrom - ptrTo) >= 32 * 1024 * 1024:
-            raise Exception("Out of Jump range (|{} - {}| = {} > {})".format(hex(ptrFrom), hex(ptrTo),
-                                                                             hex(abs(ptrFrom - ptrTo)),
-                                                                             hex(32 * 1024 * 1024)))
 
     # codeIndex 保存被覆盖的几条指令
     # jmpType   跳转方式: b bl rel ldr
@@ -399,7 +391,7 @@ class JumperBase:
         return self.lf.get_relocation(expName).address
 
     # 调用 addHook 之后 currentPC 指向了我们写代码的位置
-    def addHook(self, fromPtr, jmpType="LDR", printTips=True, printRegs=False, fpReg="R11"):
+    def addHook(self, fromPtr, jmpType="LDR", printTips=True, printRegs=False):
         self._recordFromToLOG = [fromPtr, self.currentTramp, jmpType]
         if hookedFunctions.get(fromPtr) is not None:
             raise Exception("Ptr:{} is Already Hooked".format(hex(fromPtr)))
@@ -412,11 +404,10 @@ class JumperBase:
         self.jumpTo(self.currentTramp, fromPtr, codeIndex=0, jmpType=jmpType, reg="R12", resetPC=True, resetBackPC=True)
         self.saveEnv()
         if printTips:
-            self.jumpTo(self.getSymbolByName("prepareArgs", mPtr=fromPtr), jmpType="BL", resetPC=False)
             self.jumpTo(self.getSymbolByName("printTips", mPtr=fromPtr), jmpType="BL", resetPC=False)
         # 读取hook时候的registers
         if printRegs:
-            self.jumpTo(self.getSymbolByName("printRegs", fpReg=fpReg), jmpType="BL", resetPC=False)
+            self.jumpTo(self.getSymbolByName("printRegs"), jmpType="BL", resetPC=False)
         # 跳转真实hook代码
         self.jumpTo(self.currentCodes, jmpType="BL", resetPC=False)
         self.restoreEnv()
@@ -466,14 +457,16 @@ class JumperBase:
             useSpCount = self._AllocSpSize
         self.patchASM("ADD SP,SP,#{}".format(self._pSize * useSpCount))
 
-    def getSymbolByName(self, name, mPtr=None, fpReg="R11"):
+    def getSymbolByName(self, name, mPtr=None):
 
         def prepareFunctions():
+            # 只构建一次,后续再用到都直接返回函数地址
             if functionsMap.get(str(name)) is None and name == "printRegs":
                 tmpPC = self.currentPC
                 self.resetPC(self.currentCodes)
                 self.recordSymbol("printRegs", self.currentPC)
                 self.patchASM("STMFD SP!, {LR}")
+                # 一共十六个参数 R3传递一个参数 剩下的15个使用堆栈
                 self.prepareStack(15)
                 # ANDROID_LOG_UNKNOWN = 0 ANDROID_LOG_DEFAULT = 1 ANDROID_LOG_VERBOSE = 2 ANDROID_LOG_DEBUG = 3 ANDROID_LOG_INFO = 4 ANDROID_LOG_WARN = 5 ANDROID_LOG_ERROR = 6 ANDROID_LOG_FATAL = 7 ANDROID_LOG_SILENT = 8
                 self.patchASM("MOV {},#{}".format("R0", 6))
@@ -483,18 +476,18 @@ class JumperBase:
                     " \n\t\tR0~R3:\t%p %p %p %p \n\t\tR4~R10:\t%p %p %p %p %p %p %p \n\t\tFP:%p IP:%p LR:%p SP:%p CPSR:%p".format(
                         hex(0))),
                     reg="R2")
-                if fpReg != "R11":
-                    self.patchASM("MOV R11,{}".format(fpReg))
-                self.patchASM("ADD R3,R11,#{}".format(3 * 4))
+                # R11/FP + 3*pSize -> R3
+                # 结合 def getArg(self, regIndex=0, toReg="R0", defFP="R11") 上面的堆栈情况注释来看这段代码
+                self.patchASM("ADD R3,R11,#{}".format(3 * self._pSize))
                 self.patchASM("LDMIA R3,{R4,R5,R6,R7,R8,R9,r10}")
                 self.patchASM("STMIA SP,{R4,R5,R6,R7,R8,R9,r10}")
-                self.patchASM("ADD R3,R11,#{}".format(3 * 4 + 7 * 4))
+                self.patchASM("ADD R3,R11,#{}".format(3 * self._pSize + 7 * self._pSize))
                 self.patchASM("LDMIA R3,{R4,R5,R6,R7,R8,R9}")
-                self.patchASM("ADD R3,SP,#{}".format(7 * 4))
+                self.patchASM("ADD R3,SP,#{}".format(7 * self._pSize))
                 self.patchASM("STMIA R3,{R4,R5,R6,R7,R8,R9}")
                 self.getArg(regIndex=14, toReg="R4")
                 self.getArg(regIndex=13, toReg="R5")
-                self.patchASM("ADD R3,SP,#{}".format((6 + 7) * 4))
+                self.patchASM("ADD R3,SP,#{}".format((6 + 7) * self._pSize))
                 self.patchASM("STMIA R3,{R4,R5}")
                 self.getArg(regIndex=0, toReg="R3")
                 self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg="R4", resetPC=False)
@@ -502,32 +495,14 @@ class JumperBase:
                 self.patchASM("LDMFD SP!, {PC}")
                 self.currentCodes = self.currentPC
                 self.resetPC(tmpPC)
+            # 每个函数参数不一致每次构建不同的并返回(如果想让它一直,那前面必然有一个堆栈或者是内存读写,还是会多一个调用)
             elif mPtr is not None and name == "printTips":
                 tmpPC = self.currentPC
                 tmpCode = self.currentCodes
                 self.resetPC(self.currentCodes)
                 self.recordSymbol("printTips", self.currentPC)
                 self.patchASM("STMFD SP!, {LR}")
-                self.prepareStack(1)
-                self.patchASM("MOV {},#{}".format("R0", 6))
-                self.loadToReg(self.getStr("ZZZ"), reg="R1")
-                if mPtr in functionsMap.values():
-                    self.loadToReg(self.getStr("Called %s at %p"), reg="R2")
-                else:
-                    self.loadToReg(self.getStr("Called %p ---> %p"), reg="R2")
-                self.patchASM("LDR R4,[R4]")
-                self.saveRegToStack("R4", index=0)
-                self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg="R4", resetPC=False)
-                self.restoreStack()
-                self.patchASM("LDMFD SP!, {PC}")
-                self.currentCodes = self.currentPC
-                self.resetPC(tmpPC)
-                return tmpCode
-            elif mPtr is not None and name == "prepareArgs":
-                tmpPC = self.currentPC
-                tmpCode = self.currentCodes
-                self.resetPC(self.currentCodes)
-                self.patchASM("STMFD SP!, {LR}")
+                # 准备参数
                 if mPtr in functionsMap.values():
                     for item in functionsMap.items():
                         if item[1] == mPtr:
@@ -538,14 +513,34 @@ class JumperBase:
                     self.loadToReg(self.addGOT(mPtr=mPtr), reg="R3")
                     self.patchASM("LDR R3,[R3]")
                     self.loadToReg(self.getPtr(mPtr), reg="R4")
-                    # self.patchASM("LDR R4,[R4]")
+                # 准备日志调用
+                self.prepareStack(1)
+                self.patchASM("MOV {},#{}".format("R0", 6))
+                self.loadToReg(self.getStr("ZZZ"), reg="R1")
+                if mPtr in functionsMap.values():
+                    self.loadToReg(self.getStr("Called %s at %p"), reg="R2")
+                else:
+                    self.loadToReg(self.getStr("Called %p ---> %p"), reg="R2")
+                self.patchASM("LDR R4,[R4]")
+                self.saveRegToStack("R4", index=0)
+                self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg="R4", resetPC=False)
+                self.restoreStack(1)
                 self.patchASM("LDMFD SP!, {PC}")
                 self.currentCodes = self.currentPC
                 self.resetPC(tmpPC)
                 return tmpCode
+
         tmpRet = prepareFunctions()
         return tmpRet if tmpRet is not None else functionsMap.get(str(name))
 
+    @staticmethod
+    def checkJmpRange(ptrFrom, ptrTo):
+        # B指令和BL指令最大跳转距离是 ±32M (bits[23:0]是立即数空间,指令最低两位都为 0,去除一个符号位，即为2^25)
+        if abs(ptrFrom - ptrTo) >= 32 * 1024 * 1024:
+            raise Exception("Out of Jump range (|{} - {}| = {} > {})".format(hex(ptrFrom), hex(ptrTo),
+                                                                             hex(abs(ptrFrom - ptrTo)),
+                                                                             hex(32 * 1024 * 1024)))
+        
     @staticmethod
     def getGotByName(name):
         if name is not None:
