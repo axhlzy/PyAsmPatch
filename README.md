@@ -5,7 +5,7 @@ Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) file
  1. 合并编译出的so中的指定节到我们待修改的so（MergeUtils中提供的 recordSymbols 屏蔽掉合并后函数地址的变化）
  2. UnityJumper.addHook 后当前pc已经准在了待写代码的位置，写完代码调用 UnityJumper.endHook() 
  3. addHook中也支持查看hook位置的Regs值(printRegs=True),具体实现是读取进入hook代码前对所有用户态寄存器保存在堆栈的值(R11/FP)
- 4. Hook InitArray 的第一个函数（Unity是hook il2cpp_init），在此处获取基址，并将GOT_TABLE中的每一项加上这个基址重新写回
+ 4. Hook InitArray 的第一个函数（Unity是hook il2cpp_init），在此处获取基址，并将GOT_TABLE中的每一项加上这个基址重新写回，0标识结束
  5. LDR 指令修复,其他PC相关指令后续再说  TODO .....
  6. 封装一些常用的函数 android_log_print mprotect callFunction Unity.JNI(单个参数没问题，多参数有bug)
  
