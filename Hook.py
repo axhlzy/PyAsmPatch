@@ -2,7 +2,7 @@
 #  @Author      lzy <axhlzy@live.cn>
 #  @HomePage    https://github.com/axhlzy
 #  @CreatedTime 2021/09/30 18:42
-#  @UpdateTime  2021/10/18 17:45
+#  @UpdateTime  2021/10/19 15:35
 #  @Des         Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) file
 #
 
@@ -24,6 +24,9 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+configSize = {"GLOBAL_TABLE": 2000, "STR_TABLE": 2000, "GOT_TABLE": 2000, "trampolines": 2000, "textCodes": 2000,
+              "GOT_TABLE_fill": 500, "mProtect_size": 1024 * 40}
+hookedFunctions = {}
 functionsMap = {}
 gotMap = {}
 
@@ -54,6 +57,7 @@ class JumperBase:
         self._jumpBackPC = 0
         self._returnAddr = 0
         self._codeContainer = [[], [], [], [], [], [], [], [], []]
+        self._recordFromToLOG = []
 
         if ARCH == ARCH_ARM:
             self.cs = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM)
@@ -113,12 +117,12 @@ class JumperBase:
     def patchASM(self, asm="nop"):
         self.patchList(self.ks.asm(asm)[0])
 
-    def saveEnv(self):
+    def saveEnv(self, fpReg="R11"):
         self.patchASM("push {r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr}")
         self.patchASM("MRS R11, CPSR")
         self.patchASM("MOV R12, SP")
         self.patchASM("STMFD SP!, {R11,R12}")
-        self.patchASM("MOV R11,SP")
+        self.patchASM("MOV {},SP".format(fpReg))
 
     def restoreEnv(self):
         self.patchASM("LDMFD SP!, {R11,R12}")
@@ -155,12 +159,12 @@ class JumperBase:
             self.patchList(self._codeContainer[codeIndex])
 
     def save(self, name=None):
-        if self.currentGOT > self.getSymbolByName("GOT_TABLE") + 2000 or self.currentPtr > self.getSymbolByName(
-                "STR_TABLE") + 2000 or self.currentPtr > self.getSymbolByName(
-                "GLOBAL_TABLE") + 2000 or self.currentTramp > self.getSymbolByName(
-                "trampolines") + 2000:
+        if self.currentGOT > self.getSymbolByName("GOT_TABLE") + configSize["GOT_TABLE"] \
+                or self.currentPtr > self.getSymbolByName("STR_TABLE") + configSize["STR_TABLE"] \
+                or self.currentPtr > self.getSymbolByName("GLOBAL_TABLE") + configSize["GLOBAL_TABLE"] \
+                or self.currentTramp > self.getSymbolByName("trampolines") + configSize["trampolines"]:
             raise Exception("Out of inject size")
-        if self.currentCodes > self.getSymbolByName("textCodes") + 2000:
+        if self.currentCodes > self.getSymbolByName("textCodes") + configSize["textCodes"]:
             print("textCodes may be exceeded here")
 
         # 保存在传入so的目录下，未填写名称则默认在原名称后面添加一个N
@@ -173,11 +177,18 @@ class JumperBase:
         self.lf.write(path)
         return path
 
+    @staticmethod
+    def checkJmpRange(ptrFrom, ptrTo):
+        # B指令和BL指令最大跳转距离是 ±32M (bits[23:0]是立即数空间,指令最低两位都为 0,去除一个符号位，即为2^25)
+        if abs(ptrFrom - ptrTo) >= 32 * 1024 * 1024:
+            raise Exception("Out of Jump range (|{} - {}| = {} > {})".format(hex(ptrFrom), hex(ptrTo),
+                                                                             hex(abs(ptrFrom - ptrTo)),
+                                                                             hex(32 * 1024 * 1024)))
+
     # codeIndex 保存被覆盖的几条指令
     # jmpType   跳转方式: b bl rel ldr
     # reg       ldr 跳转借用的寄存器(请选择没有使用到的寄存器)
     # reSetPC   是否把pc指向跳转过去的位置
-
     def jumpTo(self, toAddress=0, fromAddress=0, codeIndex=-1, jmpType="LDR", reg="R12", resetPC=True,
                resetBackPC=False, showLog=False):
         if fromAddress != 0:
@@ -217,15 +228,8 @@ class JumperBase:
                     # tmpCodeContainer.extend(self.ks.asm(tmpInsList[index])[0])
             # self._codeContainer[codeIndex] = tmpCodeContainer
 
-        def checkJmpRange():
-            # B指令和BL指令最大跳转距离是 ±32M (bits[23:0]是立即数空间,指令最低两位都为 0,去除一个符号位，即为2^25)
-            if abs(self.currentPC - toAddress) >= 32 * 1024 * 1024:
-                raise Exception("Out of Jump range (|{} - {}| = {} > {})".format(hex(self.currentPC), hex(toAddress),
-                                                                                 hex(abs(self.currentPC - toAddress)),
-                                                                                 hex(32 * 1024 * 1024)))
-
         def JMP_B():
-            checkJmpRange()
+            self.checkJmpRange(self.currentPC, toAddress)
             SaveCode()
             self._returnAddr = self.currentPC + self._pSize * 1
             self.patchASM("B #{}".format(self.calOffset(self.currentPC - 4 * 2, toAddress)))  # B/BL 本就是从当前位置算起
@@ -236,7 +240,7 @@ class JumperBase:
                       + "\t--->\t" + self.getAsmFromAddress(tmpPC)[0])
 
         def JMP_BL():
-            checkJmpRange()
+            self.checkJmpRange(self.currentPC, toAddress)
             SaveCode()
             self._returnAddr = self.currentPC + self._pSize * 1
             self.patchASM("BL #{}".format(self.calOffset(self.currentPC - 4 * 2, toAddress)))
@@ -247,11 +251,11 @@ class JumperBase:
                       + "\t--->\t" + self.getAsmFromAddress(tmpPC)[0])
 
         def JMP_BEQ():
-            checkJmpRange()
+            self.checkJmpRange(self.currentPC, toAddress)
             self.patchASM("BEQ #{}".format(self.calOffset(self.currentPC - 4 * 2, toAddress)))
 
         def JMP_BNE():
-            checkJmpRange()
+            self.checkJmpRange(self.currentPC, toAddress)
             self.patchASM("BNE #{}".format(self.calOffset(self.currentPC - 4 * 2, toAddress)))
 
         def JMP_LDA():
@@ -395,15 +399,24 @@ class JumperBase:
         return self.lf.get_relocation(expName).address
 
     # 调用 addHook 之后 currentPC 指向了我们写代码的位置
-    def addHook(self, fromPtr, jmpType="LDR", printTips=True, printRegs=False):
+    def addHook(self, fromPtr, jmpType="LDR", printTips=True, printRegs=False, fpReg="R11"):
+        self._recordFromToLOG = [fromPtr, self.currentTramp, jmpType]
+        if hookedFunctions.get(fromPtr) is not None:
+            raise Exception("Ptr:{} is Already Hooked".format(hex(fromPtr)))
+
+        if jmpType in ("BL", "BLX", "B", "BEQ", "BNE"):
+            self.checkJmpRange(self._recordFromToLOG[0], self._recordFromToLOG[1])
+        print("addHook {} ---> {}\t{}\n----------".format(hex(self._recordFromToLOG[0]), hex(self._recordFromToLOG[1]),
+                                                          self._recordFromToLOG[2]))
+
         self.jumpTo(self.currentTramp, fromPtr, codeIndex=0, jmpType=jmpType, reg="R12", resetPC=True, resetBackPC=True)
         self.saveEnv()
         if printTips:
             self.jumpTo(self.getSymbolByName("prepareArgs", mPtr=fromPtr), jmpType="BL", resetPC=False)
-            self.jumpTo(self.getSymbolByName("printTips"), jmpType="BL", resetPC=False)
+            self.jumpTo(self.getSymbolByName("printTips", mPtr=fromPtr), jmpType="BL", resetPC=False)
         # 读取hook时候的registers
         if printRegs:
-            self.jumpTo(self.getSymbolByName("printRegs"), jmpType="BL", resetPC=False)
+            self.jumpTo(self.getSymbolByName("printRegs", fpReg=fpReg), jmpType="BL", resetPC=False)
         # 跳转真实hook代码
         self.jumpTo(self.currentCodes, jmpType="BL", resetPC=False)
         self.restoreEnv()
@@ -416,6 +429,8 @@ class JumperBase:
     def endHook(self):
         self.patchASM("LDMFD SP!, {PC}")
         self.currentCodes = self.currentPC
+        hookedFunctions.setdefault(self._recordFromToLOG[0], self._recordFromToLOG[1])
+        print("--------------------------------------------------------------------------")
 
     # 获取进入hook之前的寄存器值
     # r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr, CPSR, SP
@@ -451,7 +466,7 @@ class JumperBase:
             useSpCount = self._AllocSpSize
         self.patchASM("ADD SP,SP,#{}".format(self._pSize * useSpCount))
 
-    def getSymbolByName(self, name, mPtr=None):
+    def getSymbolByName(self, name, mPtr=None, fpReg="R11"):
 
         def prepareFunctions():
             if functionsMap.get(str(name)) is None and name == "printRegs":
@@ -465,9 +480,11 @@ class JumperBase:
                 # R0=>3 R1=>p"ZZZ" R2=>p"---> %p %p %p %p" R3=>R0 SP=>R1 SP,[#4]=>R2 SP,[#8]=>R3
                 self.loadToReg(self.getStr("ZZZ"), reg="R1")
                 self.loadToReg(self.getStr(
-                    "\nInline registers ---> \nR0~R3:\t%p %p %p %p \nR4~R10:\t%p %p %p %p %p %p %p \nFP:%p IP:%p LR:%p SP:%p CPSR:%p".format(
+                    " \n\t\tR0~R3:\t%p %p %p %p \n\t\tR4~R10:\t%p %p %p %p %p %p %p \n\t\tFP:%p IP:%p LR:%p SP:%p CPSR:%p".format(
                         hex(0))),
                     reg="R2")
+                if fpReg != "R11":
+                    self.patchASM("MOV R11,{}".format(fpReg))
                 self.patchASM("ADD R3,R11,#{}".format(3 * 4))
                 self.patchASM("LDMIA R3,{R4,R5,R6,R7,R8,R9,r10}")
                 self.patchASM("STMIA SP,{R4,R5,R6,R7,R8,R9,r10}")
@@ -485,15 +502,19 @@ class JumperBase:
                 self.patchASM("LDMFD SP!, {PC}")
                 self.currentCodes = self.currentPC
                 self.resetPC(tmpPC)
-            elif functionsMap.get(str(name)) is None and name == "printTips":
+            elif mPtr is not None and name == "printTips":
                 tmpPC = self.currentPC
+                tmpCode = self.currentCodes
                 self.resetPC(self.currentCodes)
                 self.recordSymbol("printTips", self.currentPC)
                 self.patchASM("STMFD SP!, {LR}")
                 self.prepareStack(1)
                 self.patchASM("MOV {},#{}".format("R0", 6))
                 self.loadToReg(self.getStr("ZZZ"), reg="R1")
-                self.loadToReg(self.getStr("Called %s at %p"), reg="R2")
+                if mPtr in functionsMap.values():
+                    self.loadToReg(self.getStr("Called %s at %p"), reg="R2")
+                else:
+                    self.loadToReg(self.getStr("Called %p ---> %p"), reg="R2")
                 self.patchASM("LDR R4,[R4]")
                 self.saveRegToStack("R4", index=0)
                 self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg="R4", resetPC=False)
@@ -501,20 +522,27 @@ class JumperBase:
                 self.patchASM("LDMFD SP!, {PC}")
                 self.currentCodes = self.currentPC
                 self.resetPC(tmpPC)
+                return tmpCode
             elif mPtr is not None and name == "prepareArgs":
                 tmpPC = self.currentPC
                 tmpCode = self.currentCodes
                 self.resetPC(self.currentCodes)
                 self.patchASM("STMFD SP!, {LR}")
-                for item in functionsMap.items():
-                    if item[1] == mPtr:
-                        self.loadToReg(self.getStr(item[0]), reg="R3")
-                        self.loadToReg(self.getPtr(item[1]), reg="R4")
+                if mPtr in functionsMap.values():
+                    for item in functionsMap.items():
+                        if item[1] == mPtr:
+                            self.loadToReg(self.getStr(item[0]), reg="R3")
+                            self.loadToReg(self.getPtr(item[1]), reg="R4")
+                            break
+                else:
+                    self.loadToReg(self.addGOT(mPtr=mPtr), reg="R3")
+                    self.patchASM("LDR R3,[R3]")
+                    self.loadToReg(self.getPtr(mPtr), reg="R4")
+                    # self.patchASM("LDR R4,[R4]")
                 self.patchASM("LDMFD SP!, {PC}")
                 self.currentCodes = self.currentPC
                 self.resetPC(tmpPC)
                 return tmpCode
-
         tmpRet = prepareFunctions()
         return tmpRet if tmpRet is not None else functionsMap.get(str(name))
 
@@ -532,6 +560,7 @@ class JumperBase:
 class CommonBase(JumperBase):
     def __init__(self, filePath, ARCH=ARCH_ARM):
         JumperBase.__init__(self, filePath, ARCH=ARCH_ARM)
+        print("--------------------------------------------------------------------------")
         self.hookInit()
 
     def hookInit(self, log=True):
@@ -547,7 +576,7 @@ class CommonBase(JumperBase):
         self.fixGot(log=log)
 
     def fixGot(self, log):
-        self.mprotect(mPtr=functionsMap.get("GLOBAL_TABLE"), size=1024 * 40, log=log)
+        self.mprotect(mPtr=functionsMap.get("GLOBAL_TABLE"), size=configSize["mProtect_size"], log=log)
         self.loadBaseToReg(reg="R9", log=True)
         self.relocationGot(reg="R9")
         self.endHook()
@@ -784,7 +813,13 @@ class MergeUtils:
         self.recordSymbol("GOT_TABLE", self.getSym2("GOT_TABLE"))
         self.recordSymbol("trampolines", self.getSym2("trampolines"))
         self.recordSymbol("textCodes", self.getSym2("textCodes"))
-        print("\n")
+
+        # 导出函数初始化
+        self.recordSymbol("il2cpp_init", self.getSym1("il2cpp_init"), fix=False)
+        self.recordSymbol("il2cpp_alloc", self.getSym1("il2cpp_alloc"), fix=False)
+        self.recordSymbol("il2cpp_free", self.getSym1("il2cpp_free"), fix=False)
+        self.recordSymbol("il2cpp_string_new", self.getSym1("il2cpp_string_new"), fix=False)
+        print("--------------------------------------------------------------------------")
 
     # 合并整个段
     def mergeSeg(self):
@@ -801,7 +836,7 @@ class MergeUtils:
         self.section = section
 
         tmpList = []
-        for index in range(0, 500):
+        for index in range(0, configSize["GOT_TABLE_fill"]):
             tmpList += [0x0, 0x0, 0x0, 0x0]
         self.lf_2.patch_address(self.lf_2.get_symbol("GOT_TABLE").value, tmpList)
         self.lf_2.write(r"C:\Users\pc\AppData\Local\Temp\libinjectTMP.so")
@@ -816,7 +851,9 @@ class MergeUtils:
         self.offset = self.text.virtual_address - tempOff
         injectSize = self.text.size
         self.vAddr = self.lf_1.get_section(section).virtual_address
-        print("[*] mergeSection => " + section + " => " + str(hex(self.vAddr)) + "\n")
+        print("--------------------------------------------------------------------------")
+        print("[*] mergeSection => " + section + " => " + str(hex(self.vAddr)))
+        print("--------------------------------------------------------------------------")
         self.recordCommon()
         return retPath
 
@@ -830,8 +867,8 @@ class MergeUtils:
             return self.vAddr + (
                     self.lf_2.get_symbol(symName).value - self.lf_2.get_section(self.section).virtual_address)
 
-    def recordSymbol(self, name, ptr):
-        if str(name) in ("GLOBAL_TABLE", "STR_TABLE", "trampolines", "textCodes", "GOT_TABLE"):
+    def recordSymbol(self, name, ptr, fix=True):
+        if str(name) in ("GLOBAL_TABLE", "STR_TABLE", "trampolines", "textCodes", "GOT_TABLE") or not fix:
             functionsMap.setdefault(name, ptr)
             print("[*] recordSym ---> {}\t{}".format(str(name).ljust(15, " "), hex(ptr)))
         else:
@@ -842,6 +879,7 @@ class MergeUtils:
     def recordSymbols(self, maps):
         for name in maps.keys():
             self.recordSymbol(name, maps.get(name))
+        print("-------------------------------------")
 
     @staticmethod
     def getSymbolByName(name):
