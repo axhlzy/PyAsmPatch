@@ -2,7 +2,7 @@
 #  @Author      lzy <axhlzy@live.cn>
 #  @HomePage    https://github.com/axhlzy
 #  @CreatedTime 2021/09/30 18:42
-#  @UpdateTime  2021/10/19 16:15
+#  @UpdateTime  2021/10/20 11:56
 #  @Des         Use lief, keystone and capstone to manually inline hook elf(libil2cpp.so) file
 #
 
@@ -540,7 +540,7 @@ class JumperBase:
             raise Exception("Out of Jump range (|{} - {}| = {} > {})".format(hex(ptrFrom), hex(ptrTo),
                                                                              hex(abs(ptrFrom - ptrTo)),
                                                                              hex(32 * 1024 * 1024)))
-        
+
     @staticmethod
     def getGotByName(name):
         if name is not None:
@@ -714,14 +714,20 @@ class UnityJumper(CommonBase):
                    0x00, 0x00, 0x00, 0x00,
                    eval(hex(len(args))), 0x00, 0x00, 0x00]
         for index in range(0, len(args)):
-            # struct jValue只需要四字节，但是内存展现给我们的感觉是一个数组项占用了8字节，且前四字节似乎只是标识这个后面的四字节是否使用一样的感觉
-            tmpList.extend([0x1, 0x00, 0x00, 0x00])
+            # struct jValue[]
+            # ptr.add(0xC)  ===>    arrayLength
+            # ptr.add(0x10) ===>    第一个参数
+            # ptr.add(0x18) ===>    第二个参数 (每个参数之前差8字节,前四字节为值 [后四个字节可能为TYPE(后四字节猜的)])
             if type(args[index]) is int:
                 tmpList.extend(self.calOffsetToList(0, args[index], 0))
+                tmpList.extend([0x00, 0x00, 0x00, 0x00])
             elif type(args[index]) is str:
+                # 这里是有问题的,这里填写的str是静态的的地址,即使运行时候修复了也会崩,猜测可能会用到后四字节
                 tmpList.extend(self.calOffsetToList(0, self.getStr(args[index]), 4))
+                tmpList.extend([0x00, 0x00, 0x00, 0x00])
             elif type(args[index]) is bool:
                 tmpList.extend([0x1 if args[index] else 0x0, 0x00, 0x00, 0x00])
+                tmpList.extend([0x00, 0x00, 0x00, 0x00])
         tmpList.extend([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])  # 0填充
         self.patchList(tmpList)
         self.currentStr = self.currentStr + len(tmpList)
@@ -729,12 +735,14 @@ class UnityJumper(CommonBase):
         self.currentPC = tmpCPC
         return tmpRetPtr
 
-    def getUnityStr(self, mStr):
-        self.loadToReg(self.getStr(mStr), "R0")
+    def getUnityStr(self, mStr, reg="R0"):
+        self.loadToReg(self.getStr(mStr), reg)
         try:
             self.jumpTo(functionsMap.get("il2cpp_string_new"), jmpType="BL", resetPC=False)
         except:
             self.jumpTo(functionsMap.get("il2cpp_string_new"), jmpType="REG", resetPC=False)
+        if reg != "R0":
+            self.patchASM("MOV {},R0".format(reg))
 
     def FindClass(self, clsName):
         self.getUnityStr(clsName)
@@ -769,10 +777,10 @@ class UnityJumper(CommonBase):
         else:
             # 不是用到args时一定得将R2写成0，不然R2之前可能有不可预期的值，进入Call之后对jValue解析就会崩溃
             self.patchASM("MOV R2,#0")
-            try:
-                self.jumpTo(functionsMap.get("CallStaticVoidMethod"), jmpType="BL", resetPC=False)
-            except:
-                self.jumpTo(functionsMap.get("CallStaticVoidMethod"), jmpType="REG", resetPC=False)
+        try:
+            self.jumpTo(functionsMap.get("CallStaticVoidMethod"), jmpType="BL", resetPC=False)
+        except:
+            self.jumpTo(functionsMap.get("CallStaticVoidMethod"), jmpType="REG", resetPC=False)
 
     def setFunctionRet(self, pFunction, pRet):
         self.resetPC(pFunction)
