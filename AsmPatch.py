@@ -27,7 +27,6 @@ class JumperBase:
         self.mapStr = {}
 
         self._pSize = ARCH
-        self._fixLdrPC = {}
         self._AllocSpSize = 0
         self._lastPC = 0
         self._jumpBackPC = 0
@@ -132,7 +131,7 @@ class JumperBase:
             if tmpType == "default": return 1
             if tmpType == "ldr1": return 3
             if tmpType == "ldr2": return 4
-            if tmpType == "fixPC": return 4
+            if tmpType == "fixPC": return 7
             if tmpType == "fixBneBeq": return 2
             if tmpType == "fixBJmp": return 1
 
@@ -148,7 +147,9 @@ class JumperBase:
         def fixPC(insStr):
             # 零时用一下就懒得移动SP，直接把R12放在SP的上面，这里也有一个弊端如果内层函数调用会读取当层的R12就会出问题，但是太小概率了不管了
             self.patchASM("STR R12,[SP,#-0x4]")
-            self.loadToReg(self._extraFixData[codeIndex]["fromAddress"] + self._pSize * 2, reg="R12")
+            fixAddr = self.addGOT(self._extraFixData[codeIndex]["fromAddress"] + self._pSize * (index + 2))
+            self.loadToReg(fixAddr, reg="R12")
+            self.patchASM("LDR R12,[R12]")
             self.patchASM(insStr.replace("pc", "r12"))
             self.patchASM("LDR R12,[SP,#-0x4]")
 
@@ -173,7 +174,7 @@ class JumperBase:
         def default(insStr):
             self.patchASM(insStr)
 
-        operation = {'ldr1': fixLDR,
+        operation = {'ldr1': fixPC,  # fixLDR
                      'ldr2': fixPC,
                      'fixPC': fixPC,
                      'fixBneBeq': fixBeqBne,
@@ -248,17 +249,6 @@ class JumperBase:
             self._extraFixData[codeIndex] = {"fromAddress": fromAddress, "toAddress": toAddress, "jmpType": jmpType,
                                              "reg": reg, "resetPC": resetPC, "resetBackPC": resetBackPC,
                                              "showLog": showLog}
-            # fix     ldr pc -> ldr r12  from self._fixLdrPC
-            tmpInsList = self.getAsmFromList(self._codeContainer[codeIndex])
-            # tmpCodeContainer = []
-            for index in range(0, len(tmpInsList)):
-                item = tmpInsList[index]
-                if item.find("ldr") != -1 and item.find("pc") != -1:
-                    # tmpCodeContainer.extend(self.ks.asm(tmpInsList[index].replace("pc", "r12"))[0])
-                    tmpLdrPC = fromAddress + self._pSize * (index + 2) + eval(item[item.find("#") + 1:item.find("]")])
-                    self._fixLdrPC.setdefault("fixLdrPC_{}".format(fromAddress), tmpLdrPC)
-                elif item.find("ldr") != -1:
-                    pass
 
         def JMP_B():
             self.checkJmpRange(self.currentPC, toAddress)
