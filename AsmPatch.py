@@ -33,6 +33,7 @@ class JumperBase:
         self._jumpBackPC = 0
         self._returnAddr = 0
         self._codeContainer = [[], [], [], [], [], [], [], [], []]
+        self._extraFixData = [{}, {}, {}, {}, {}, {}, {}, {}, {}]
         self._recordFromToLOG = []
 
         if ARCH == ARCH_ARM:
@@ -72,9 +73,6 @@ class JumperBase:
             tmpList.reverse()
         return tmpList
 
-    def ldrGenerator(self, loadAddress, register):
-        pass
-
     def getAsmFromList(self, mList, startAddr=0x1000):
         retList = []
         for i in self.cs.disasm(bytes(mList), startAddr):
@@ -105,34 +103,87 @@ class JumperBase:
         self.patchASM("MSR CPSR, R11")
         self.patchASM("pop {r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr}")
 
-    def restoreCode(self, codeIndex=0, fromAddress=0):
-        tmp = self._fixLdrPC.get("fixLdrPC_{}".format(fromAddress))
-        if tmp is not None:
-            tmpInsList = self.getAsmFromList(self._codeContainer[codeIndex])
-            for index in range(0, len(tmpInsList)):
-                item = tmpInsList[index]
-                if item.find("ldr") != -1 and item.find("pc") != -1:
-                    tmpReg = item[item.find("ldr ") + 4:item.find(", [")]
-                    self.patchASM("LDR {}, [PC,#0]".format(tmpReg))
-                    self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
-                    self.patchList(self.calOffsetToList(self.currentPC - 4, tmp, 1))
-                # 修复 BL
-                elif item.find("BL") != -1:
-                    # [31:28]位是条件码
-                    # [27: 24]位为"1010"(0xeaffffff为一条指令的二进制机器码)时，表示B跳转指令
-                    # [23: 0] 表示一个相对于PC的偏移地址
-                    # todo
-                    pass
-                elif item.find("BLX") != -1:
-                    # todo
-                    pass
-                elif item.find("B") != -1:
-                    # todo
-                    pass
-                else:
-                    self.patchASM(item)
-        else:
-            self.patchList(self._codeContainer[codeIndex])
+    def restoreCode(self, codeIndex=0):
+
+        # 属于那种指令 返回0则不需要修复
+        def getType(insStr):
+            # 修复 LDR (其实这一步的修复也可以像后面一样直接把pc用r12来替换) / LDR R0, =(byte_125A8C9 - 0x357B18)
+            if insStr.find("ldr") != -1 and insStr.find("pc") != -1 and insStr.find("#") != -1:
+                return "ldr1"
+            # 修复 LDR / LDR R0, [PC,R0]
+            elif insStr.find("ldr") != -1 and insStr.find("pc") != -1 and insStr.find("#") == -1:
+                return "ldr2"
+            # MOV/ADD/SUB PC 相关的指令
+            elif (insStr.find("mov") != -1 or insStr.find("add") != -1 or insStr.find("sub") != -1) and insStr.find("pc") != -1:
+                return "fixPC"
+            # 修复 BNE/BEQ
+            elif insStr.find("bne") == 0 or insStr.find("beq") == 0:
+                return "fixBneBeq"
+            # 修复 BL/BLX and 修复 B/BX (排除 bl rx的情况)
+            elif ((insStr.find("bl") != -1 or insStr.find("blx") != -1) or (
+                    insStr.find("b") != -1 or insStr.find("bx") != -1)) and insStr.find("r") == -1:
+                return "fixBJmp"
+            else:
+                return "default"
+
+        # 修复该条指令需要用到几条指令
+        def getTypePatchSize(insStr):
+            tmpType = getType(insStr)
+            if tmpType == "default": return 1
+            if tmpType == "ldr1": return 3
+            if tmpType == "ldr2": return 4
+            if tmpType == "fixPC": return 4
+            if tmpType == "fixBneBeq": return 2
+            if tmpType == "fixBJmp": return 1
+
+        def fixLDR(insStr):
+            # tmpCodeContainer.extend(self.ks.asm(tmpInsList[index].replace("pc", "r12"))[0])
+            tmpLdrPC = self._extraFixData[codeIndex]["fromAddress"] + self._pSize * (index + 2) + eval(
+                insStr[insStr.find("#") + 1:insStr.find("]")])
+            tmpReg = insStr[insStr.find("ldr ") + 4:insStr.find(", [")]
+            self.patchASM("LDR {}, [PC,#0]".format(tmpReg))
+            self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
+            self.patchList(self.calOffsetToList(self.currentPC - 4, tmpLdrPC, 1))
+
+        def fixPC(insStr):
+            # 零时用一下就懒得移动SP，直接把R12放在SP的上面，这里也有一个弊端如果内层函数调用会读取当层的R12就会出问题，但是太小概率了不管了
+            self.patchASM("STR R12,[SP,#-0x4]")
+            self.loadToReg(self._extraFixData[codeIndex]["fromAddress"] + self._pSize * 2, reg="R12")
+            self.patchASM(insStr.replace("pc", "r12"))
+            self.patchASM("LDR R12,[SP,#-0x4]")
+
+        def fixBeqBne(insStr):
+            tmpOffset = insStr.split("#")[1]
+            if insStr.find("beq") == 0:
+                tItem = insStr.replace("beq", "bne").replace(tmpOffset, hex(self._pSize * 4))
+            else:
+                tItem = insStr.replace("bne", "beq").replace(tmpOffset, hex(self._pSize * 4))
+            self.patchASM(tItem)
+            tmpToAddr = self._extraFixData[codeIndex]["fromAddress"] + self._pSize * index + eval(tmpOffset) - configSize["offset"]
+            self.jumpTo(tmpToAddr - self._pSize * 2, jmpType="LDR", resetPC=False)
+
+        def fixBJmp(insStr):
+            # eval(item.split("#")[1]) 原本的 BL 已经被修正过了，所以这里得修复一下跳转 多了一次offset （- configSize["offset"]）
+            toAddress = self._extraFixData[codeIndex]["fromAddress"] + self._pSize * index + eval(
+                insStr.split("#")[1]) - configSize["offset"]
+            jmpType = "REG" if (insStr.find("bl") != -1 or insStr.find("blx") != -1) else "LDR"
+            # 默认计算了pc偏移的，然而bl本身就是一个简单的加法，所以这里的toAddress需要减去2个_pSize
+            self.jumpTo(toAddress - self._pSize * 2, jmpType=jmpType, reg="R12", resetPC=False)
+
+        def default(insStr):
+            self.patchASM(insStr)
+
+        operation = {'ldr1': fixLDR,
+                     'ldr2': fixPC,
+                     'fixPC': fixPC,
+                     'fixBneBeq': fixBeqBne,
+                     'fixBJmp': fixBJmp,
+                     'default': default
+                     }
+        tmpInsList = self.getAsmFromList(self._codeContainer[codeIndex])
+        # 逐条解析保存的指令并修复指令
+        for index in range(0, len(tmpInsList)):
+            operation[getType(tmpInsList[index])](tmpInsList[index])
 
     def save(self, name=None):
         if self.currentGOT > self.getSymbolByName("GOT_TABLE") + configSize["GOT_TABLE"] \
@@ -149,8 +200,9 @@ class JumperBase:
             newName = oldNameSp[0] + "N." + oldNameSp[1]
             path = self.fileDIR.replace(self.fileName, newName)
         else:
-            path = os.path.dirname(self.filePath) + "/" + name
+            path = os.path.dirname(self.filePath) + "\\" + name
         self.lf.write(path)
+        print("\nSave libil2cpp.so to " + path)
         return path
 
     # codeIndex 保存被覆盖的几条指令
@@ -192,6 +244,10 @@ class JumperBase:
                 if codeIndex != -1:
                     self._codeContainer[codeIndex] = self.lf.get_content_from_virtual_address(self.currentPC,
                                                                                               self._pSize * 3)
+
+            self._extraFixData[codeIndex] = {"fromAddress": fromAddress, "toAddress": toAddress, "jmpType": jmpType,
+                                             "reg": reg, "resetPC": resetPC, "resetBackPC": resetBackPC,
+                                             "showLog": showLog}
             # fix     ldr pc -> ldr r12  from self._fixLdrPC
             tmpInsList = self.getAsmFromList(self._codeContainer[codeIndex])
             # tmpCodeContainer = []
@@ -201,10 +257,8 @@ class JumperBase:
                     # tmpCodeContainer.extend(self.ks.asm(tmpInsList[index].replace("pc", "r12"))[0])
                     tmpLdrPC = fromAddress + self._pSize * (index + 2) + eval(item[item.find("#") + 1:item.find("]")])
                     self._fixLdrPC.setdefault("fixLdrPC_{}".format(fromAddress), tmpLdrPC)
-                else:
+                elif item.find("ldr") != -1:
                     pass
-                    # tmpCodeContainer.extend(self.ks.asm(tmpInsList[index])[0])
-            # self._codeContainer[codeIndex] = tmpCodeContainer
 
         def JMP_B():
             self.checkJmpRange(self.currentPC, toAddress)
@@ -236,7 +290,7 @@ class JumperBase:
             self.checkJmpRange(self.currentPC, toAddress)
             self.patchASM("BNE #{}".format(self.calOffset(self.currentPC - 4 * 2, toAddress)))
 
-        def JMP_LDA():
+        def JMP_LDR():
             SaveCode()
             self._returnAddr = self.currentPC + self._pSize * 3
             self.patchASM("LDR {},[PC]".format(reg))
@@ -244,7 +298,7 @@ class JumperBase:
             self.patchList(self.calOffsetToList(self.currentPC - 4, toAddress))  # 起点算的是pc的位置(上一条)，而不是当前位置
 
             if showLog:
-                print('\n[*] Patch Code TYPE : JMP_LDA')
+                print('\n[*] Patch Code TYPE : JMP_LDR')
                 tmpPC = self.currentPC - 4 * 3
                 listPatch = self.lf.get_content_from_virtual_address(tmpPC + 4 * 2, 4)
                 listPatchCP = listPatch.copy()
@@ -279,7 +333,7 @@ class JumperBase:
             self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
             self.patchList(self.calOffsetToList(self.currentPC - 8, toAddress, 0))
 
-        switch = {'LDR': JMP_LDA,  # 远距离的B
+        switch = {'LDR': JMP_LDR,  # 远距离的B
                   'REG': JMP_REG,  # 远距离的BL
                   'REL': JMP_REL,  # 跳转GOT
                   'BEQ': JMP_BEQ,
@@ -395,7 +449,7 @@ class JumperBase:
         # 跳转真实hook代码
         self.jumpTo(self.currentCodes, jmpType="BL", resetPC=False)
         self.restoreEnv()
-        self.restoreCode(codeIndex=0, fromAddress=fromPtr)
+        self.restoreCode(codeIndex=0)
         self.jumpTo(self._jumpBackPC, fromAddress=self.currentPC, jmpType=jmpType, reg="R12", resetPC=False)
         self.currentTramp = self.currentPC
         self.currentPC = self.currentCodes

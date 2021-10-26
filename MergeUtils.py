@@ -16,7 +16,6 @@ class MergeUtils:
     def __init__(self, path1, path2=r"C:\Users\pc\AndroidStudioProjects\liefInject\app\release\libinject.so"):
         self.path1 = path1
         self.path2 = path2
-        self.offset = None
         self.lf_1 = lief.parse(path1)
         self.lf_2 = lief.parse(path2)
         self.text = self.lf_1.get_section(".text")
@@ -71,7 +70,7 @@ class MergeUtils:
         self.lf_1.add(self.lf_2.get_section(section))
         retPath = self.save("libil2cpp_merge.so")
 
-        self.offset = self.text.virtual_address - tempOff
+        configSize["offset"] = self.text.virtual_address - tempOff
         injectSize = self.text.size
         self.vAddr = self.lf_1.get_section(section).virtual_address
         print("--------------------------------------------------------------------------")
@@ -90,14 +89,15 @@ class MergeUtils:
             return self.vAddr + (
                     self.lf_2.get_symbol(symName).value - self.lf_2.get_section(self.section).virtual_address)
 
-    def recordSymbol(self, name, ptr, fix=True):
+    @staticmethod
+    def recordSymbol(name, ptr, fix=True):
         if str(name) in ("GLOBAL_TABLE", "STR_TABLE", "trampolines", "textCodes", "GOT_TABLE") or not fix:
             functionsMap.setdefault(name, ptr)
             print("[*] recordSym ---> {}\t{}".format(str(name).ljust(15, " "), hex(ptr)))
         else:
-            functionsMap.setdefault(name, ptr + self.offset)
+            functionsMap.setdefault(name, ptr + configSize["offset"])
             print("[*] recordSym ---> {}\t{} ---> {}".format(str(name).ljust(25, " "), hex(ptr).ljust(10, " "),
-                                                             hex(ptr + self.offset)))
+                                                             hex(ptr + configSize["offset"])))
 
     def recordSymbols(self, maps):
         for name in maps.keys():
