@@ -1,11 +1,11 @@
-from AndroidPatch import CommonBase
+from AndroidPatch import AndroidPatcher
 from Config import functionsMap, ARCH_ARM
 
 
-class UnityJumper(CommonBase):
+class UnityPatcher(AndroidPatcher):
 
     def __init__(self, filePath, ARCH=ARCH_ARM):
-        CommonBase.__init__(self, filePath, ARCH=ARCH)
+        AndroidPatcher.__init__(self, filePath, ARCH=ARCH)
         # gotMap add Got Functions
         for item in functionsMap.items():
             self.addGOT(int(item[1]), item[0])
@@ -13,6 +13,19 @@ class UnityJumper(CommonBase):
     def hookInit(self, log=True):
         self.addHook(self.lf.get_symbol("il2cpp_init").value, jmpType="B", printTips=False, printRegs=False)
         self.fixGot(log=log)
+        self.fixU16ToU8()
+
+    # fix unicode_to_utf8
+    def fixU16ToU8(self):
+        tmpPC = self.currentPC
+        self.saveCode(fromPtr=self.getSymbolByName("unicode_to_utf8") + 0x2C, codeIndex=3, insLength=2)
+        self.jumpTo(toAddress=self.currentTramp, fromAddress=self.getSymbolByName("unicode_to_utf8") + 0x28)
+        self.jumpTo(self.getRelocation("malloc"), jmpType="REL", reg="R12", resetPC=False)
+        self.restoreCode(codeIndex=3, needFix=False)
+        self.jumpTo(self.getRelocation("__aeabi_memclr"), jmpType="REL", reg="R12", resetPC=False)
+        self.jumpTo(toAddress=self.getSymbolByName("unicode_to_utf8") + 0x38, resetPC=False)
+        self.currentTramp = self.currentPC
+        self.currentPC = tmpPC
 
     def getJValueArray(self, *args):
         # 四字节对齐
@@ -90,3 +103,17 @@ class UnityJumper(CommonBase):
     def nop(self, pFunction):
         self.resetPC(pFunction)
         self.patchASM("BX LR")
+
+    def readU16(self, fromReg, toReg="R0", tmpReg="R6"):
+        self.malloc(0x100, toReg="R2")
+        self.patchASM("MOV R7,R2")
+        # 拿到 U16长度
+        self.patchASM("LDR {},[{},#0x8]".format(tmpReg, fromReg))
+        # 长度乘以二
+        self.patchASM("ADD R1,{},{}".format(tmpReg, tmpReg))
+        # u16开始位置
+        self.patchASM("ADD R0,{},#0xC".format(fromReg))
+        self.jumpTo(self.getSymbolByName("unicode_to_utf8"), jmpType="BL", reg=tmpReg, resetPC=False)
+        self.patchASM("LDR {},[R7]".format(toReg))
+        # 把这个指针放在 R2
+        self.patchASM("MOV R1,R7")

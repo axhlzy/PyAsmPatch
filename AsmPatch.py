@@ -7,7 +7,7 @@ from keystone import keystone
 from Config import ARCH_ARM, functionsMap, configSize, gotMap, hookedFunctions, ARCH_ARM64
 
 
-class JumperBase:
+class AsmPatcher:
 
     def __init__(self, filePath, ARCH=ARCH_ARM):
 
@@ -41,9 +41,9 @@ class JumperBase:
         elif ARCH == ARCH_ARM64:
             # self.cs = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
             # self.ks = keystone.Ks(keystone.KS_ARCH_ARM64, keystone.KS_MODE_ARM)
-            raise Exception("Todo by yourself -.-")
+            raise Exception("Todo  -.-")
         else:
-            raise Exception("Todo by yourself -.-")
+            raise Exception("Todo  -.-")
 
         # 我们需要使用到的导出函数（主要是一些系统函数，如果有没有，我们需要自己去添加需要的lib以及添加导出项）
         # print("\nCurrent Needed Libraries : ")
@@ -102,9 +102,13 @@ class JumperBase:
         self.patchASM("MSR CPSR, R11")
         self.patchASM("pop {r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr}")
 
-    def restoreCode(self, codeIndex=0):
+    def saveCode(self, codeIndex=0, insLength=3, fromPtr=None):
+        if fromPtr is None:
+            fromPtr = self.currentPC
+        self._codeContainer[codeIndex] = self.lf.get_content_from_virtual_address(fromPtr, self._pSize * insLength)
 
-        # 属于那种指令 返回0则不需要修复
+    def restoreCode(self, codeIndex=0, needFix=True):
+
         def getType(insStr):
             # 修复 LDR (其实这一步的修复也可以像后面一样直接把pc用r12来替换) / LDR R0, =(byte_125A8C9 - 0x357B18)
             if insStr.find("ldr") != -1 and insStr.find("pc") != -1 and insStr.find("#") != -1:
@@ -113,7 +117,8 @@ class JumperBase:
             elif insStr.find("ldr") != -1 and insStr.find("pc") != -1 and insStr.find("#") == -1:
                 return "ldr2"
             # MOV/ADD/SUB PC 相关的指令
-            elif (insStr.find("mov") != -1 or insStr.find("add") != -1 or insStr.find("sub") != -1) and insStr.find("pc") != -1:
+            elif (insStr.find("mov") != -1 or insStr.find("add") != -1 or insStr.find("sub") != -1) and insStr.find(
+                    "pc") != -1:
                 return "fixPC"
             # 修复 BNE/BEQ
             elif insStr.find("bne") == 0 or insStr.find("beq") == 0:
@@ -160,7 +165,8 @@ class JumperBase:
             else:
                 tItem = insStr.replace("bne", "beq").replace(tmpOffset, hex(self._pSize * 4))
             self.patchASM(tItem)
-            tmpToAddr = self._extraFixData[codeIndex]["fromAddress"] + self._pSize * index + eval(tmpOffset) - configSize["offset"]
+            tmpToAddr = self._extraFixData[codeIndex]["fromAddress"] + self._pSize * index + eval(tmpOffset) - \
+                        configSize["offset"]
             self.jumpTo(tmpToAddr - self._pSize * 2, jmpType="LDR", resetPC=False)
 
         def fixBJmp(insStr):
@@ -182,11 +188,15 @@ class JumperBase:
                      'default': default
                      }
         tmpInsList = self.getAsmFromList(self._codeContainer[codeIndex])
-        # 逐条解析保存的指令并修复指令
-        for index in range(0, len(tmpInsList)):
-            operation[getType(tmpInsList[index])](tmpInsList[index])
+        if needFix:
+            # 逐条解析保存的指令并修复指令
+            for index in range(0, len(tmpInsList)):
+                operation[getType(tmpInsList[index])](tmpInsList[index])
+        else:
+            self.patchList(self._codeContainer[codeIndex])
 
     def save(self, name=None):
+        # 检查范围
         if self.currentGOT > self.getSymbolByName("GOT_TABLE") + configSize["GOT_TABLE"] \
                 or self.currentPtr > self.getSymbolByName("STR_TABLE") + configSize["STR_TABLE"] \
                 or self.currentPtr > self.getSymbolByName("GLOBAL_TABLE") + configSize["GLOBAL_TABLE"] \
@@ -237,14 +247,12 @@ class JumperBase:
                 if resetBackPC:
                     self._jumpBackPC = fromAddress + self._pSize * 1
                 if codeIndex != -1:
-                    self._codeContainer[codeIndex] = self.lf.get_content_from_virtual_address(self.currentPC,
-                                                                                              self._pSize * 1)
+                    self.saveCode(codeIndex, 1)
             elif jmpType == "LDR":
                 if resetBackPC:
                     self._jumpBackPC = fromAddress + self._pSize * 3
                 if codeIndex != -1:
-                    self._codeContainer[codeIndex] = self.lf.get_content_from_virtual_address(self.currentPC,
-                                                                                              self._pSize * 3)
+                    self.saveCode(codeIndex, 3)
 
             self._extraFixData[codeIndex] = {"fromAddress": fromAddress, "toAddress": toAddress, "jmpType": jmpType,
                                              "reg": reg, "resetPC": resetPC, "resetBackPC": resetBackPC,
@@ -452,8 +460,8 @@ class JumperBase:
         print("--------------------------------------------------------------------------")
 
     # 获取进入hook之前的寄存器值
-    # r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr, CPSR, SP
-    # CPSP SP r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr
+    # 期望 r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr, CPSR, SP
+    # 实际 CPSP SP r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr
     def getArg(self, regIndex=0, toReg="R0", defFP="R11"):
         index = 4 * (regIndex + 2)
         if index > 4 * 17:

@@ -41,6 +41,10 @@ class MergeUtils:
         self.recordSymbol("il2cpp_alloc", self.getSym1("il2cpp_alloc"), fix=False)
         self.recordSymbol("il2cpp_free", self.getSym1("il2cpp_free"), fix=False)
         self.recordSymbol("il2cpp_string_new", self.getSym1("il2cpp_string_new"), fix=False)
+
+        # 其他函数
+        self.recordSymbol("unicode_to_utf8", self.getSym2("unicode_to_utf8"), fix=False)
+
         print("--------------------------------------------------------------------------")
 
     # 合并整个段

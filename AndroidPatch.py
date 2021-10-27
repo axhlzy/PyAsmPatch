@@ -1,10 +1,10 @@
-from AsmPatch import JumperBase
+from AsmPatch import AsmPatcher
 from Config import ARCH_ARM, functionsMap, configSize
 
 
-class CommonBase(JumperBase):
+class AndroidPatcher(AsmPatcher):
     def __init__(self, filePath, ARCH=ARCH_ARM):
-        JumperBase.__init__(self, filePath, ARCH=ARCH_ARM)
+        AsmPatcher.__init__(self, filePath, ARCH=ARCH_ARM)
         print("--------------------------------------------------------------------------")
         self.hookInit()
 
@@ -93,6 +93,16 @@ class CommonBase(JumperBase):
         elif type(str1) is str:
             self.loadToReg(self.getStr(str1), reg=reg1)
         self.jumpTo(self.getRelocation("strcmp"), jmpType="REL", reg="R3", resetPC=False)
+
+    def malloc(self, size, toReg="R0"):
+        self.patchASM("MOV R0,#{}".format(size))
+        self.jumpTo(self.getRelocation("malloc"), jmpType="REL", reg="R12", resetPC=False)
+        if toReg != "R0":
+            self.patchASM("MOV {},R0".format(toReg))
+
+    def free(self, fromReg="R1"):
+        self.patchASM("MOV R0,{}".format(fromReg))
+        self.jumpTo(self.getRelocation("free"), jmpType="REL", reg="R12", resetPC=False)
 
     def android_log_print_msg(self, prio=3, tag="ZZZ", msg="Called"):
         self.patchASM("MOV R0, #{}".format(prio))

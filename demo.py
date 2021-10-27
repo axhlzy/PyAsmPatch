@@ -1,19 +1,20 @@
 from MergeUtils import MergeUtils
-from UnityPatch import UnityJumper
+from UnityPatch import UnityPatcher
 
 if __name__ == '__main__':
     ins = MergeUtils(r"C:\xxxxxxx\libil2cpp_cp32.so")
     newSoPath = ins.mergeSection(".inject")
 
     # 如果要用到JNI 这些函数是必填项
-    ins.recordSymbols({"il2cpp_string_new": 0x2BE988, "FindClass": 0xEE5684, "GetStaticMethodID": 0xEE60EC,
+    ins.recordSymbols({"FindClass": 0xEE5684, "GetStaticMethodID": 0xEE60EC,
                        "CallStaticVoidMethod": 0xEE74E4})
 
     # 自己需要的Hook的函数名以及地址（记得recordSymbol在UnityJumper构造之前添加）
     ins.recordSymbol("ShowSettings", 0xB69D4C)
     ins.recordSymbol("UI_Splash", 0x41c4c8)
+    ins.recordSymbol("OnPopulateMesh+140", 0x9EE45C)
 
-    ins = UnityJumper(newSoPath)
+    ins = UnityPatcher(newSoPath)
 
     ins.addHook(ins.getSymbolByName("UI_Splash"), printRegs=False)
     ins.android_log_print_msg(msg="描述 : called this function")
@@ -29,4 +30,10 @@ if __name__ == '__main__':
     ins.CallStaticVoidMethod("com/ironsource/unity/androidbridge/AndroidBridge", "onResume", "()V", 0)
     ins.endHook()
 
+    ins.addHook(ins.getSymbolByName("OnPopulateMesh+140"), printRegs=True)
+    ins.getArg(0, toReg="R5")
+    ins.readU16(fromReg="R5", toReg="R3")
+    ins.android_log_print_reg(formart="----> %s")
+    ins.free(fromReg="R1")
+    ins.endHook()
     ins.save("libil2cpp_final.so")
