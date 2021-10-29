@@ -90,17 +90,23 @@ class AsmPatcher:
     def patchASM(self, asm="nop"):
         self.patchList(self.ks.asm(asm)[0])
 
-    def saveEnv(self, fpReg="R11"):
-        self.patchASM("push {r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr}")
-        self.patchASM("MRS R11, CPSR")
-        self.patchASM("MOV R12, SP")
-        self.patchASM("STMFD SP!, {R11,R12}")
-        self.patchASM("MOV {},SP".format(fpReg))
+    def saveEnv(self, fpReg="R11", simple=False):
+        if not simple:
+            self.patchASM("push {r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr}")
+            self.patchASM("MRS R11, CPSR")
+            self.patchASM("MOV R12, SP")
+            self.patchASM("STMFD SP!, {R11,R12}")
+            self.patchASM("MOV {},SP".format(fpReg))
+        else:
+            self.patchASM("push {r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr}")
 
-    def restoreEnv(self):
-        self.patchASM("LDMFD SP!, {R11,R12}")
-        self.patchASM("MSR CPSR, R11")
-        self.patchASM("pop {r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr}")
+    def restoreEnv(self, simple=False):
+        if not simple:
+            self.patchASM("LDMFD SP!, {R11,R12}")
+            self.patchASM("MSR CPSR, R11")
+            self.patchASM("pop {r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr}")
+        else:
+            self.patchASM("pop {r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, pc}")
 
     def saveCode(self, codeIndex=0, insLength=3, fromPtr=None):
         if fromPtr is None:
@@ -150,10 +156,10 @@ class AsmPatcher:
             self.patchList(self.calOffsetToList(self.currentPC - 4, tmpLdrPC, 1))
 
         def fixPC(insStr):
-            # 零时用一下就懒得移动SP，直接把R12放在SP的上面，这里也有一个弊端如果内层函数调用会读取当层的R12就会出问题，但是太小概率了不管了
+            # 零时用一下就懒得移动SP，直接把R12放在SP的上面
             self.patchASM("STR R12,[SP,#-0x4]")
             fixAddr = self.addGOT(self._extraFixData[codeIndex]["fromAddress"] + self._pSize * (index + 2))
-            self.loadToReg(fixAddr, reg="R12")
+            self.loadToReg(fixAddr, toReg="R12")
             self.patchASM("LDR R12,[R12]")
             self.patchASM(insStr.replace("pc", "r12"))
             self.patchASM("LDR R12,[SP,#-0x4]")
@@ -165,8 +171,7 @@ class AsmPatcher:
             else:
                 tItem = insStr.replace("bne", "beq").replace(tmpOffset, hex(self._pSize * 4))
             self.patchASM(tItem)
-            tmpToAddr = self._extraFixData[codeIndex]["fromAddress"] + self._pSize * index + eval(tmpOffset) - \
-                        configSize["offset"]
+            tmpToAddr = self._extraFixData[codeIndex]["fromAddress"] + self._pSize * index + eval(tmpOffset) - configSize["offset"]
             self.jumpTo(tmpToAddr - self._pSize * 2, jmpType="LDR", resetPC=False)
 
         def fixBJmp(insStr):
@@ -342,9 +347,9 @@ class AsmPatcher:
         if resetPC:
             self.currentPC = toAddress
 
-    def loadToReg(self, mPtr, reg="R0", fix=1):
-        self.patchASM("LDR {}, [PC,#4]".format(reg))
-        self.patchASM("ADD {}, PC, {}".format(reg, reg))
+    def loadToReg(self, mPtr, toReg="R0", fix=1):
+        self.patchASM("LDR {}, [PC,#4]".format(toReg))
+        self.patchASM("ADD {}, PC, {}".format(toReg, toReg))
         self.jumpTo(self.currentPC + self._pSize * 2, jmpType="B", resetPC=False)
         self.patchList(self.calOffsetToList(self.currentPC - 4, mPtr, fix))
 
@@ -460,26 +465,21 @@ class AsmPatcher:
         print("--------------------------------------------------------------------------")
 
     # 获取进入hook之前的寄存器值
+    #      0   1   2   3   4   5   6   7   8   9  10  11  12  13   14   15
     # 期望 r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr, CPSR, SP
     # 实际 CPSP SP r0, r1, r2, r3, r4, r5, r6, r7, r8, sb, sl, fp, ip, lr
     def getArg(self, regIndex=0, toReg="R0", defFP="R11"):
-        index = 4 * (regIndex + 2)
-        if index > 4 * 17:
+        if regIndex not in range(0, 16):
             raise Exception("ArrayIndexOutOfBoundsException")
-        elif index == 4 * 15:
-            index = 0
-        elif index == 4 * 16:
-            index = 4 * 1
-        self.patchASM("LDR {},[{},#{}]".format(toReg, defFP, index))
+        offset = 4 * (regIndex + 2) if regIndex < 14 else 4 * (regIndex - 14)
+        self.patchASM("LDR {},[{},#{}]".format(toReg, defFP, offset))
 
     # 修改进入hook之前的reg值(r0 write back to r12[regIndex])
     def setArg(self, regIndex=0, fromReg="R0", defFP="R11"):
-        index = 4 * (regIndex + 1)
-        if index > 4 * 15:
+        if regIndex not in range(0, 16):
             raise Exception("ArrayIndexOutOfBoundsException")
-        elif index == 4 * 15:
-            index = 0
-        self.patchASM("STR {},[{},#{}]".format(fromReg, defFP, index))
+        offset = 4 * (regIndex + 2) if regIndex < 14 else 4 * (regIndex - 14)
+        self.patchASM("STR {},[{},#{}]".format(fromReg, defFP, offset))
 
     def saveRegToStack(self, reg="R0", index=0):
         self.patchASM("STR {},[SP,#{}]".format(reg, self._pSize * index))
@@ -491,6 +491,7 @@ class AsmPatcher:
     def restoreStack(self, useSpCount=None):
         if useSpCount is None:
             useSpCount = self._AllocSpSize
+            self._AllocSpSize = None
         self.patchASM("ADD SP,SP,#{}".format(self._pSize * useSpCount))
 
     def getSymbolByName(self, name, mPtr=None):
@@ -501,17 +502,16 @@ class AsmPatcher:
                 tmpPC = self.currentPC
                 self.resetPC(self.currentCodes)
                 self.recordSymbol("printRegs", self.currentPC)
-                self.patchASM("STMFD SP!, {LR}")
+                self.saveEnv(simple=True)
                 # 一共十六个参数 R3传递一个参数 剩下的15个使用堆栈
                 self.prepareStack(15)
                 # ANDROID_LOG_UNKNOWN = 0 ANDROID_LOG_DEFAULT = 1 ANDROID_LOG_VERBOSE = 2 ANDROID_LOG_DEBUG = 3 ANDROID_LOG_INFO = 4 ANDROID_LOG_WARN = 5 ANDROID_LOG_ERROR = 6 ANDROID_LOG_FATAL = 7 ANDROID_LOG_SILENT = 8
                 self.patchASM("MOV {},#{}".format("R0", 6))
                 # R0=>3 R1=>p"ZZZ" R2=>p"---> %p %p %p %p" R3=>R0 SP=>R1 SP,[#4]=>R2 SP,[#8]=>R3
-                self.loadToReg(self.getStr("ZZZ"), reg="R1")
+                self.loadToReg(self.getStr("ZZZ"), toReg="R1")
                 self.loadToReg(self.getStr(
-                    " \n\t\tR0~R3:\t%p %p %p %p \n\t\tR4~R10:\t%p %p %p %p %p %p %p \n\t\tFP:%p IP:%p LR:%p SP:%p CPSR:%p".format(
-                        hex(0))),
-                    reg="R2")
+                    " \n\t\tR0~R3:\t%p %p %p %p \n\t\tR4~R10:\t%p %p %p %p %p %p %p \n\t\tFP:%p IP:%p LR:%p SP:%p CPSR:%p"),
+                    toReg="R2")
                 # R11/FP + 3*pSize -> R3
                 # 结合 def getArg(self, regIndex=0, toReg="R0", defFP="R11") 上面的堆栈情况注释来看这段代码
                 self.patchASM("ADD R3,R11,#{}".format(3 * self._pSize))
@@ -528,7 +528,7 @@ class AsmPatcher:
                 self.getArg(regIndex=0, toReg="R3")
                 self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg="R4", resetPC=False)
                 self.restoreStack(15)
-                self.patchASM("LDMFD SP!, {PC}")
+                self.restoreEnv(simple=True)
                 self.currentCodes = self.currentPC
                 self.resetPC(tmpPC)
             # 每个函数参数不一致每次构建不同的并返回(如果想让它一直,那前面必然有一个堆栈或者是内存读写,还是会多一个调用)
@@ -537,37 +537,52 @@ class AsmPatcher:
                 tmpCode = self.currentCodes
                 self.resetPC(self.currentCodes)
                 self.recordSymbol("printTips", self.currentPC)
-                self.patchASM("STMFD SP!, {LR}")
+                self.saveEnv(simple=True)
                 # 准备参数
                 if mPtr in functionsMap.values():
                     for item in functionsMap.items():
                         if item[1] == mPtr:
-                            self.loadToReg(self.getStr(item[0]), reg="R3")
-                            self.loadToReg(self.getPtr(item[1]), reg="R4")
+                            self.loadToReg(self.getStr(item[0]), toReg="R3")
+                            self.loadToReg(self.getPtr(item[1]), toReg="R4")
                             break
                 else:
-                    self.loadToReg(self.addGOT(mPtr=mPtr), reg="R3")
+                    self.loadToReg(self.addGOT(mPtr=mPtr), toReg="R3")
                     self.patchASM("LDR R3,[R3]")
-                    self.loadToReg(self.getPtr(mPtr), reg="R4")
+                    self.loadToReg(self.getPtr(mPtr), toReg="R4")
                 # 准备日志调用
                 self.prepareStack(1)
                 self.patchASM("MOV {},#{}".format("R0", 6))
-                self.loadToReg(self.getStr("ZZZ"), reg="R1")
+                self.loadToReg(self.getStr("ZZZ"), toReg="R1")
                 if mPtr in functionsMap.values():
-                    self.loadToReg(self.getStr("Called %s at %p"), reg="R2")
+                    self.loadToReg(self.getStr("Called %s at %p"), toReg="R2")
                 else:
-                    self.loadToReg(self.getStr("Called %p ---> %p"), reg="R2")
+                    self.loadToReg(self.getStr("Called %p ---> %p"), toReg="R2")
                 self.patchASM("LDR R4,[R4]")
                 self.saveRegToStack("R4", index=0)
                 self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg="R4", resetPC=False)
                 self.restoreStack(1)
-                self.patchASM("LDMFD SP!, {PC}")
+                self.restoreEnv(simple=True)
                 self.currentCodes = self.currentPC
                 self.resetPC(tmpPC)
                 return tmpCode
 
         tmpRet = prepareFunctions()
         return tmpRet if tmpRet is not None else functionsMap.get(str(name))
+
+    def setFunctionRet(self, pFunction, pRet):
+        self.resetPC(pFunction)
+        self.patchASM("MOV R0, #{}".format(pRet))
+        self.nop(self.currentPC)
+
+    def nop(self, pFunction):
+        self.resetPC(pFunction)
+        self.patchASM("BX LR")
+
+    def addBP(self, mPtr=None):
+        if mPtr is not None:
+            self.resetPC(self.currentPC)
+        # FE FF FF EA    死循环
+        self.patchASM("b #0")
 
     @staticmethod
     def checkJmpRange(ptrFrom, ptrTo):

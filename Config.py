@@ -5,4 +5,5 @@ configSize = {"GLOBAL_TABLE": 2000, "STR_TABLE": 2000, "GOT_TABLE": 2000, "tramp
               "GOT_TABLE_fill": 500, "mProtect_size": 1024 * 40, "offset": 0}
 hookedFunctions = {}
 functionsMap = {}
+stringMap = {}
 gotMap = {}
