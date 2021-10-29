@@ -1,5 +1,5 @@
 from AndroidPatch import AndroidPatcher
-from Config import functionsMap, ARCH_ARM, stringMap, configSize
+from Config import *
 
 
 class UnityPatcher(AndroidPatcher):
@@ -40,31 +40,43 @@ class UnityPatcher(AndroidPatcher):
             self.patchASM("MOV R8,R0")
             self.patchASM("MOV R9,R1")
             self.patchASM("MOV R10,R2")
+            self.patchASM("CMP R5,#0x2")
+            self.preAsm("BNE #loopStart")
+            self.patchASM("MOV R3,R8")
+            self.android_log_print_reg(formart="[*] ---> %s")
             # if R6 + offset != R10
-            self.patchASM("CMP R7,R10", labName="Label1")
+            self.patchASM("CMP R7,R10", labName="loopStart")
             # 跳转到 循环完成依旧没有匹配
-            self.preAsm("BEQ #Label2")
+            self.preAsm("BEQ #loopOver")
             self.strcmp(fromSR1="R7", fromSR2="R8", toReg="R6")
             self.strlen(fromSR="R7", toReg="R0")
             self.patchASM("ADD R7,R7,#1")
             self.patchASM("ADD R7,R7,R0")
             # 判断字符串相等，跳转到使用R7构造u16并返回
             self.patchASM("CMP R6,#0")
-            self.preAsm("BEQ #Label3")
+            self.preAsm("BEQ #foundEq")
             self.strlen(fromSR="R7", toReg="R0")
             self.patchASM("ADD R7,R7,#1")
             self.patchASM("ADD R7,R7,R0")
             # 跳转到下次循环
-            self.preAsm("B #Label1")
+            self.preAsm("B #loopStart")
             # 使用R7构造u16并返回
-            self.patchASM("MOV R0,R7", labName="Label3")
+            self.patchASM("CMP R5,#0x1", labName="foundEq")
+            self.preAsm("BNE #jmpOver")
+            self.prepareStack(1)
+            self.patchASM("MOV R3,R8")
+            self.saveRegToStack(reg="R7", index=0)
+            self.android_log_print_reg(formart="[*] replace : %s ---> %s")
+            self.patchASM("MOV R0,R7")
+            self.restoreStack()
             # 跳转到最后返回的位置
-            self.patchASM("B #0x8")
+            self.preAsm("B #jmpOver")
             # 循环完成依旧没有匹配
-            self.patchASM("MOV R0,R8", labName="Label2")
+            self.patchASM("MOV R0,R8", labName="loopOver")
             # 最后返回的位置
+            self.preLabel("jmpOver")
             self.jumpTo(functionsMap.get("il2cpp_string_new"), jmpType="REG", resetPC=False)
-            self.enableAsm()
+            self.preAsmEnable()
             self.restoreEnv(simple=True)
             self.currentCodes = self.currentPC
             self.resetPC(tmpPC)
@@ -155,6 +167,7 @@ class UnityPatcher(AndroidPatcher):
         if reg != "R0":
             self.patchASM("MOV {},R0".format(reg))
 
+    # Use R0 - R4 /  use fromReg > R4
     def convertToU8(self, toReg="R0", fromReg="R0"):
         # 固定一个位置存放未初始化变量
         self.loadToReg(self.getPtr(0xFFFFFFF0), toReg="R2")
@@ -183,11 +196,13 @@ class UnityPatcher(AndroidPatcher):
     # retStr:存放字典映射关系
     # fromReg:我们需要处理的字符串放在哪里(传入u8)
     # toReg:处理后的字符串放在那里(传出u8/u16)
-    def getReplaceStr(self, repDic, argReg="R0", retReg="R0"):
+    # use R0 - R3
+    def getReplaceStr(self, repDic, argReg="R0", retReg="R0", LogType=0):
         ret = self.recordStringMap(repDic)
         self.convertToU8(fromReg=argReg, toReg="R0")
         self.loadToReg(ret[0], toReg="R1")
         self.loadToReg(ret[1], toReg="R2")
+        self.patchASM("MOV R3,#{}".format(LogType))
         # self.addBP()
         # 返回了一个字符串 起始位置 和 结束位置
         self.jumpTo(self.getSymbolByName("replaceStrInner"), jmpType="BL", resetPC=False)

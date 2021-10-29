@@ -1,3 +1,10 @@
+#
+#  @Author      lzy <axhlzy@live.cn>
+#  @HomePage    https://github.com/axhlzy
+#  @CreatedTime 2021/09/30 18:42
+#  @Des         Use keystone,capstone,lief to patch arm32
+#
+
 import os
 
 import capstone
@@ -96,13 +103,13 @@ class AsmPatcher:
         preFuncMap[0].setdefault(labName, self.currentPC)
 
     # use like this " B #lable1 /bne #lable2 "
-    def preAsm(self, asm="nop", label=None):
-        if label is not None:
-            self.preLabel(label)
+    def preAsm(self, asm="nop", labName=None):
+        if labName is not None:
+            self.preLabel(labName)
         preFuncMap[1].setdefault(asm, self.currentPC)
         self.patchASM("nop")
 
-    def enableAsm(self):
+    def preAsmEnable(self):
         for func in preFuncMap[1].items():
             opStr = str(func[0]).split("#")[0]
             opSub = str(func[0]).split("#")[1]

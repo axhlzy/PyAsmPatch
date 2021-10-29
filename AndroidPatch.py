@@ -1,5 +1,5 @@
 from AsmPatch import AsmPatcher
-from Config import ARCH_ARM, functionsMap, configSize
+from Config import *
 
 
 class AndroidPatcher(AsmPatcher):
@@ -153,6 +153,20 @@ class AndroidPatcher(AsmPatcher):
         self.loadToReg(self.getStr(tag), toReg="R1")
         self.loadToReg(self.getStr(formart), toReg="R2")
         self.jumpTo(self.getRelocation("__android_log_print"), jmpType="REL", reg="R4", resetPC=False)
+
+    # 封装一层,参数传递使用R0依次往后(不受限于R0-R3参数传递)
+    def android_log_print_mix(self, formart="---> %p", countArgs=1, prio=3, tag="ZZZ"):
+        self.saveEnv(simple=True)
+        if countArgs <= 1:
+            self.patchASM("MOV R3,R0")
+            self.android_log_print_reg(formart=formart, prio=prio, tag=tag)
+        else:
+            self.prepareStack(countArgs - 1)
+            for i in range(1, countArgs - 1):
+                self.saveRegToStack("R{}".format(i), i - 1)
+            self.android_log_print_reg(formart=formart, prio=prio, tag=tag)
+            self.restoreStack()
+        self.restoreEnv(simple=True)
 
     def callFunction(self, mPtr, *args):
         for i in range(0, len(args)):

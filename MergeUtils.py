@@ -2,7 +2,6 @@
 #  @Author      lzy <axhlzy@live.cn>
 #  @HomePage    https://github.com/axhlzy
 #  @CreatedTime 2021/09/30 18:42
-#  @UpdateTime  2021/10/20 11:56
 #  @Des         Use lief to merge two so files
 #
 
@@ -13,7 +12,8 @@ from Config import configSize, functionsMap
 
 
 class MergeUtils:
-    def __init__(self, path1, path2=r"C:\Users\pc\AndroidStudioProjects\liefInject\app\release\libinject.so"):
+    def __init__(self, path1,
+                 path2=r"C:\Users\pc\PycharmProjects\SoInject\files\inject\libs\armeabi-v7a\libinject.so"):
         self.path1 = path1
         self.path2 = path2
         self.lf_1 = lief.parse(path1)
