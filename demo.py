@@ -30,10 +30,11 @@ if __name__ == '__main__':
     ins.CallStaticVoidMethod("com/ironsource/unity/androidbridge/AndroidBridge", "onResume", "()V", 0)
     ins.endHook()
 
-    ins.addHook(ins.getSymbolByName("OnPopulateMesh+140"), printRegs=True)
+    repStr = ({"惊吓彩蛋": "惊喜彩蛋", "contact@xxxxx.com": "axhlzy@live.cn"})
+    ins.addHook(ins.getSymbolByName("OnPopulateMesh+140"), printRegs=False)
     ins.getArg(0, toReg="R5")
-    ins.convertToU8(fromReg="R5", toReg="R3")
-    ins.android_log_print_reg(formart="----> %s")
-    ins.free(fromReg="R1")
+    ins.getReplaceStr(repDic=repStr, argReg="R5", retReg="R0")
+    ins.setArg(0, fromReg="R0")
     ins.endHook()
+
     ins.save("libil2cpp_final.so")
