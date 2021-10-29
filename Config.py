@@ -7,3 +7,4 @@ hookedFunctions = {}
 functionsMap = {}
 stringMap = {}
 gotMap = {}
+preFuncMap = [{}, {}]

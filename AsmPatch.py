@@ -4,7 +4,7 @@ import capstone
 import lief
 from keystone import keystone
 
-from Config import ARCH_ARM, functionsMap, configSize, gotMap, hookedFunctions, ARCH_ARM64
+from Config import ARCH_ARM, functionsMap, configSize, gotMap, hookedFunctions, ARCH_ARM64, preFuncMap
 
 
 class AsmPatcher:
@@ -87,8 +87,36 @@ class AsmPatcher:
         self.lf.patch_address(self.currentPC, mList)
         self.currentPC += mList.__len__()
 
-    def patchASM(self, asm="nop"):
+    def patchASM(self, asm="nop", labName=None):
+        if labName is not None:
+            self.preLabel(labName)
         self.patchList(self.ks.asm(asm)[0])
+
+    def preLabel(self, labName):
+        preFuncMap[0].setdefault(labName, self.currentPC)
+
+    # use like this " B #lable1 /bne #lable2 "
+    def preAsm(self, asm="nop", label=None):
+        if label is not None:
+            self.preLabel(label)
+        preFuncMap[1].setdefault(asm, self.currentPC)
+        self.patchASM("nop")
+
+    def enableAsm(self):
+        for func in preFuncMap[1].items():
+            opStr = str(func[0]).split("#")[0]
+            opSub = str(func[0]).split("#")[1]
+            opNum = 0
+            for label in preFuncMap[0].items():
+                if label[0] == opSub:
+                    opNum = self.calOffset(func[1], label[1], offset=0)
+            if opNum == 0:
+                raise Exception("Label Not Found")
+            tmpPC = self.currentPC
+            self.resetPC(func[1])
+            self.patchASM("{} #{}".format(opStr, opNum))
+            self.currentPC = tmpPC
+        preFuncMap.clear()
 
     def saveEnv(self, fpReg="R11", simple=False):
         if not simple:
@@ -392,15 +420,16 @@ class AsmPatcher:
         # print("[*] Added Ptr {} ---> {}".format(hex(tmpAddr), hex(mPtr)))
         return tmpAddr
 
-    def getStr(self, mStr):
+    def getStr(self, mStr, useCache=True):
         # 查找已有字符串的情况，不再走添加流程
-        for itemC in self.mapStr.items():
-            if itemC[1] == mStr:
-                print("[*] Get string at " + str(hex(itemC[0])) + "\t" + mStr)
-                return itemC[0]
-                # for itemP in self.mapPtr.items():
-                #     if itemP[1] == itemC[0]:
-                #         return itemP[0]
+        if useCache:
+            for itemC in self.mapStr.items():
+                if itemC[1] == mStr:
+                    print("[*] Get string at " + str(hex(itemC[0])) + "\t" + mStr)
+                    return itemC[0]
+                    # for itemP in self.mapPtr.items():
+                    #     if itemP[1] == itemC[0]:
+                    #         return itemP[0]
         # 保存jumper中的currentPC
         self._lastPC = self.currentPC
         # 字符编码为 utf-8

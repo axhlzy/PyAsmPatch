@@ -34,40 +34,37 @@ class UnityPatcher(AndroidPatcher):
             self.resetPC(self.currentCodes)
             self.recordSymbol("replaceStrInner", self.currentPC)
             self.saveEnv(simple=True)
-            # R7 pointer | R8 srcU8 | R9 cmpStart | R10 cmpEnd
+            # R5 ShowLOG | R6 CmpResult |R7 pointer | R8 srcU8 | R9 cmpStart | R10 cmpEnd
+            self.patchASM("MOV R5,R3")
             self.patchASM("MOV R7,R1")
             self.patchASM("MOV R8,R0")
             self.patchASM("MOV R9,R1")
             self.patchASM("MOV R10,R2")
             # if R6 + offset != R10
-            self.patchASM("CMP R7,R10")
+            self.patchASM("CMP R7,R10", labName="Label1")
             # 跳转到 循环完成依旧没有匹配
-            self.patchASM("BEQ #0x84")
+            self.preAsm("BEQ #Label2")
             self.strcmp(fromSR1="R7", fromSR2="R8", toReg="R6")
             self.strlen(fromSR="R7", toReg="R0")
             self.patchASM("ADD R7,R7,#1")
             self.patchASM("ADD R7,R7,R0")
             # 判断字符串相等，跳转到使用R7构造u16并返回
             self.patchASM("CMP R6,#0")
-            self.patchASM("BEQ #0x2C")
+            self.preAsm("BEQ #Label3")
             self.strlen(fromSR="R7", toReg="R0")
             self.patchASM("ADD R7,R7,#1")
             self.patchASM("ADD R7,R7,R0")
             # 跳转到下次循环
-            self.patchASM("B #0xFFFFFF84")
+            self.preAsm("B #Label1")
             # 使用R7构造u16并返回
-            self.patchASM("MOV R0,R7")
+            self.patchASM("MOV R0,R7", labName="Label3")
             # 跳转到最后返回的位置
             self.patchASM("B #0x8")
             # 循环完成依旧没有匹配
-            self.patchASM("MOV R0,R8")
-            # LOG DEBUG
-            # self.patchASM("MOV R5,R0")
-            # self.patchASM("MOV R3,R0")
-            # self.android_log_print_reg(formart="---> %s")
-            # self.patchASM("MOV R0,R5")
+            self.patchASM("MOV R0,R8", labName="Label2")
             # 最后返回的位置
             self.jumpTo(functionsMap.get("il2cpp_string_new"), jmpType="REG", resetPC=False)
+            self.enableAsm()
             self.restoreEnv(simple=True)
             self.currentCodes = self.currentPC
             self.resetPC(tmpPC)
@@ -178,8 +175,8 @@ class UnityPatcher(AndroidPatcher):
         tmpStrStart = self.currentStr
         for item in tmpMap.items():
             stringMap.setdefault(item[0], item[1])
-            self.getStr(item[0])
-            self.getStr(item[1])
+            self.getStr(item[0], useCache=False)
+            self.getStr(item[1], useCache=False)
         tmpStrEnd = self.currentStr
         return tmpStrStart, tmpStrEnd
 
