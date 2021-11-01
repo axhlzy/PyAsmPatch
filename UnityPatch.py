@@ -40,10 +40,13 @@ class UnityPatcher(AndroidPatcher):
             self.patchASM("MOV R8,R0")
             self.patchASM("MOV R9,R1")
             self.patchASM("MOV R10,R2")
+
             self.patchASM("CMP R5,#0x2")
             self.preAsm("BNE #loopStart")
             self.patchASM("MOV R3,R8")
-            self.android_log_print_reg(formart="[*] ---> %s")
+            self.android_log_print_reg(formart="[*] SRC ---> %s")
+            self.preAsm("B #loopOver")
+
             # if R6 + offset != R10
             self.patchASM("CMP R7,R10", labName="loopStart")
             # 跳转到 循环完成依旧没有匹配
@@ -60,6 +63,7 @@ class UnityPatcher(AndroidPatcher):
             self.patchASM("ADD R7,R7,R0")
             # 跳转到下次循环
             self.preAsm("B #loopStart")
+
             # 使用R7构造u16并返回
             self.patchASM("CMP R5,#0x1", labName="foundEq")
             self.preAsm("BNE #jmpOver")
@@ -71,8 +75,10 @@ class UnityPatcher(AndroidPatcher):
             self.restoreStack()
             # 跳转到最后返回的位置
             self.preAsm("B #jmpOver")
+
             # 循环完成依旧没有匹配
             self.patchASM("MOV R0,R8", labName="loopOver")
+
             # 最后返回的位置
             self.preLabel("jmpOver")
             self.jumpTo(functionsMap.get("il2cpp_string_new"), jmpType="REG", resetPC=False)
@@ -197,13 +203,13 @@ class UnityPatcher(AndroidPatcher):
     # fromReg:我们需要处理的字符串放在哪里(传入u8)
     # toReg:处理后的字符串放在那里(传出u8/u16)
     # use R0 - R3
+    # LogType 0:不显示日志 1:显示替换日志 2:显示源字符串
     def getReplaceStr(self, repDic, argReg="R0", retReg="R0", LogType=0):
         ret = self.recordStringMap(repDic)
         self.convertToU8(fromReg=argReg, toReg="R0")
         self.loadToReg(ret[0], toReg="R1")
         self.loadToReg(ret[1], toReg="R2")
         self.patchASM("MOV R3,#{}".format(LogType))
-        # self.addBP()
         # 返回了一个字符串 起始位置 和 结束位置
         self.jumpTo(self.getSymbolByName("replaceStrInner"), jmpType="BL", resetPC=False)
         if retReg != "R0":
