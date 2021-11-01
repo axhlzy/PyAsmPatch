@@ -203,13 +203,17 @@ class UnityPatcher(AndroidPatcher):
     # fromReg:我们需要处理的字符串放在哪里(传入u8)
     # toReg:处理后的字符串放在那里(传出u8/u16)
     # use R0 - R3
-    # LogType 0:不显示日志 1:显示替换日志 2:显示源字符串
-    def getReplaceStr(self, repDic, argReg="R0", retReg="R0", LogType=0):
-        ret = self.recordStringMap(repDic)
+    def getReplaceStr(self, argReg="R0", retReg="R0", Obj=None):
         self.convertToU8(fromReg=argReg, toReg="R0")
-        self.loadToReg(ret[0], toReg="R1")
-        self.loadToReg(ret[1], toReg="R2")
-        self.patchASM("MOV R3,#{}".format(LogType))
+        if type(Obj) is dict:
+            # 返回替换值 并打出日志
+            ret = self.recordStringMap(Obj)
+            self.loadToReg(ret[0], toReg="R1")
+            self.loadToReg(ret[1], toReg="R2")
+            self.patchASM("MOV R3,#{}".format(1))
+        else:
+            # 只显示原字符串并
+            self.patchASM("MOV R3,#{}".format(2))
         # 返回了一个字符串 起始位置 和 结束位置
         self.jumpTo(self.getSymbolByName("replaceStrInner"), jmpType="BL", resetPC=False)
         if retReg != "R0":

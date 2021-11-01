@@ -471,6 +471,8 @@ class AsmPatcher:
 
     # 调用 addHook 之后 currentPC 指向了我们写代码的位置
     def addHook(self, fromPtr, jmpType="LDR", printTips=True, printRegs=False):
+        if type(fromPtr) == str:
+            fromPtr = self.getSymbolByName(fromPtr)
         self._recordFromToLOG = [fromPtr, self.currentTramp, jmpType]
         if hookedFunctions.get(fromPtr) is not None:
             raise Exception("Ptr:{} is Already Hooked".format(hex(fromPtr)))
