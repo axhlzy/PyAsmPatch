@@ -69,7 +69,7 @@ class UnityPatcher(AndroidPatcher):
             self.preAsm("BNE #jmpOver")
             self.prepareStack(1)
             self.patchASM("MOV R3,R8")
-            self.saveRegToStack(reg="R7", index=0)
+            self.saveRegToStack(fromReg="R7", index=0)
             self.android_log_print_reg(formart="[*] replace : %s ---> %s")
             self.patchASM("MOV R0,R7")
             self.restoreStack()

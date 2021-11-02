@@ -12,6 +12,10 @@ if __name__ == '__main__':
     ins.recordSymbol("Sub", 0x9EFD38)
     ins.recordSymbol("OnPopulateMesh+140", 0x9EE45C)
 
+    # ins.recordSymbol("ShowAdsReward", 0x13c297c)
+    # ins.recordSymbol("UpdateModule", 0x63f46c)
+    # ins.recordSymbol("reward", 0x120ee68)
+
     ins = UnityPatcher(newSoPath)
     repStr = ({"惊吓彩蛋": "惊喜彩蛋", "contact@gameresort.com": "axhlzy@live.cn", "版本 2.12": " ", "有问题或评论吗？": " "})
 
@@ -33,6 +37,36 @@ if __name__ == '__main__':
     # ins.android_log_print_reg(formart="called from %p (%s)")
     # ins.restoreStack(1)
     # ins.CallStaticVoidMethod("com/ironsource/unity/androidbridge/AndroidBridge", "onResume", "()V", 0)
+    # ins.endHook()
+
+    # saveArg1 = ins.getPtr(0xffffff1)
+    # saveArg2 = ins.getPtr(0xffffff2)
+    # rewardFunc = ins.addGOT(ins.getSymbolByName("reward"))
+    #
+    # ins.addHook("ShowAdsReward", printRegs=True, printTips=True)
+    # ins.getArg(regIndex=1, toReg="R1")
+    # ins.saveRegToMem(fromReg="R1", toPtr=saveArg1)
+    # ins.patchASM("MOV R1,#0x1")
+    # ins.saveRegToMem(fromReg="R1", toPtr=saveArg2)
+    # ins.endHook()
+    #
+    # ins.addHook("UpdateModule", printRegs=False, printTips=False)
+    # ins.loadToReg(saveArg2, toReg="R0")
+    # ins.patchASM("LDR R1,[R0]")
+    # ins.patchASM("CMP R1,#0x1")
+    # ins.preAsm("BNE #jmpEnd")
+    # ins.patchASM("MOV R3,#0")
+    # ins.patchASM("STR R3,[R0]")
+    # ins.loadToReg(mPtr=saveArg1, toReg="R0")
+    # ins.patchASM("LDR R0,[R0]")
+    # ins.loadToReg(mPtr=rewardFunc, toReg="R12")
+    # ins.patchASM("LDR R12,[R12]")
+    # ins.patchASM("MOV R1,#0")
+    # ins.patchASM("MOV R2,#0")
+    # ins.patchASM("MOV R3,#0")
+    # ins.patchASM("BLX R12")
+    # ins.patchASM(labName="jmpEnd")
+    # ins.preAsmEnable()
     # ins.endHook()
 
     ins.save("libil2cpp_final.so")

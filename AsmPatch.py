@@ -123,7 +123,8 @@ class AsmPatcher:
             self.resetPC(func[1])
             self.patchASM("{} #{}".format(opStr, opNum))
             self.currentPC = tmpPC
-        preFuncMap.clear()
+        preFuncMap[0].clear()
+        preFuncMap[1].clear()
 
     def saveEnv(self, fpReg="R11", simple=False):
         if not simple:
@@ -165,8 +166,8 @@ class AsmPatcher:
             elif insStr.find("bne") == 0 or insStr.find("beq") == 0:
                 return "fixBneBeq"
             # 修复 BL/BLX and 修复 B/BX (排除 bl rx的情况)
-            elif ((insStr.find("bl") != -1 or insStr.find("blx") != -1) or (
-                    insStr.find("b") != -1 or insStr.find("bx") != -1)) and insStr.find("r") == -1:
+            elif ((insStr.find("bl") != -1 or insStr.find("blx") != -1) or (insStr.find("b") != -1 or insStr.find("bx") != -1)) \
+                    and insStr.find("r") == -1 and insStr.find("sp") == -1:
                 return "fixBJmp"
             else:
                 return "default"
@@ -470,7 +471,7 @@ class AsmPatcher:
         return self.lf.get_relocation(expName).address
 
     # 调用 addHook 之后 currentPC 指向了我们写代码的位置
-    def addHook(self, fromPtr, jmpType="LDR", printTips=True, printRegs=False):
+    def addHook(self, fromPtr, jmpType="LDR", printTips=True, printRegs=False, needFix=True):
         if type(fromPtr) == str:
             fromPtr = self.getSymbolByName(fromPtr)
         self._recordFromToLOG = [fromPtr, self.currentTramp, jmpType]
@@ -490,13 +491,28 @@ class AsmPatcher:
         # 跳转真实hook代码
         self.jumpTo(self.currentCodes, jmpType="BL", resetPC=False)
         self.restoreEnv()
-        self.restoreCode(codeIndex=0)
+        self.restoreCode(codeIndex=0, needFix=needFix)
         self.jumpTo(self._jumpBackPC, fromAddress=self.currentPC, jmpType=jmpType, reg="R12", resetPC=False)
         self.currentTramp = self.currentPC
         self.currentPC = self.currentCodes
         self.patchASM("STMFD SP!, {LR}")
 
     def endHook(self):
+        self.patchASM("LDMFD SP!, {PC}")
+        self.currentCodes = self.currentPC
+        hookedFunctions.setdefault(self._recordFromToLOG[0], self._recordFromToLOG[1])
+        print("--------------------------------------------------------------------------")
+
+    def addReplace(self, fromPtr, jmpType="LDR"):
+        if type(fromPtr) == str:
+            fromPtr = self.getSymbolByName(fromPtr)
+        if hookedFunctions.get(fromPtr) is not None:
+            raise Exception("Ptr:{} is Already Hooked".format(hex(fromPtr)))
+        print("addReplace {} ---> {}\t{}\n----------".format(hex(self._recordFromToLOG[0]), hex(self._recordFromToLOG[1]), self._recordFromToLOG[2]))
+        self.jumpTo(fromAddress=fromPtr, toAddress=self.currentCodes, jmpType=jmpType, resetPC=True)
+        self.patchASM("STMFD SP!, {LR}")
+
+    def endReplace(self):
         self.patchASM("LDMFD SP!, {PC}")
         self.currentCodes = self.currentPC
         hookedFunctions.setdefault(self._recordFromToLOG[0], self._recordFromToLOG[1])
@@ -519,8 +535,11 @@ class AsmPatcher:
         offset = 4 * (regIndex + 2) if regIndex < 14 else 4 * (regIndex - 14)
         self.patchASM("STR {},[{},#{}]".format(fromReg, defFP, offset))
 
-    def saveRegToStack(self, reg="R0", index=0):
-        self.patchASM("STR {},[SP,#{}]".format(reg, self._pSize * index))
+    def saveRegToStack(self, fromReg="R0", index=0):
+        self.patchASM("STR {},[SP,#{}]".format(fromReg, self._pSize * index))
+
+    def loadFromStack(self, toReg="R0", index=0):
+        self.patchASM("LDR {},[SP,#{}]".format(toReg, self._pSize * index))
 
     def prepareStack(self, useSpCount=10):
         self.patchASM("SUB SP,SP,#{}".format(self._pSize * useSpCount))
@@ -607,13 +626,18 @@ class AsmPatcher:
         tmpRet = prepareFunctions()
         return tmpRet if tmpRet is not None else functionsMap.get(str(name))
 
-    def setFunctionRet(self, pFunction, pRet):
+    def setFunctionRet(self, pFunction, pRet, fixOffset=False):
+        if fixOffset:
+            pFunction += configSize["offset"]
         self.resetPC(pFunction)
         self.patchASM("MOV R0, #{}".format(pRet))
         self.nop(self.currentPC)
 
-    def nop(self, pFunction):
-        self.resetPC(pFunction)
+    def nop(self, pFunction=None, fixOffset=False):
+        if fixOffset:
+            pFunction += configSize["offset"]
+        if pFunction is not None:
+            self.resetPC(pFunction)
         self.patchASM("BX LR")
 
     def addBP(self, mPtr=None):
