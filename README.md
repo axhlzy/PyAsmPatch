@@ -62,10 +62,12 @@ FP:%p IP:%p LR:%p SP:%p CPSR:%p
 后续可能的用法：
 
 可以考虑用这种方式 直接静态遍历text段 找出所有的 svc 并 hook 代理掉
-
+```
 LOAD:0000000000534D00 C8 07 80 D2                 MOV             X8, #0x3E ; '>'
 LOAD:0000000000534D04 01 00 00 D4                 SVC             0
 LOAD:0000000000534D08 1F 04 40 B1                 CMN             X0, #1,LSL#12
 LOAD:0000000000534D0C 00 94 80 DA                 CINV            X0, X0, HI
 LOAD:0000000000534D10 88 EC 00 54                 B.HI            loc_536AA0
 LOAD:0000000000534D14 C0 03 5F D6                 RET
+```
+
